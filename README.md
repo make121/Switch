@@ -116,4 +116,6 @@ TODO
 - [ASAP](https://github.com/LeCAR-Lab/ASAP): We use `ASAP` library to build our RL codebase.
 - [RSL_RL](https://github.com/leggedrobotics/rsl_rl): We use `rsl_rl` library to train the RL policies.
 - [Unitree](https://www.unitree.com/): We use `Unitree G1` as our testbed.
-- [Maskedmimic](https://github.com/NVlabs/ProtoMotions): We use retargeting pipeline in `Maskedmimic`, which based on [Mink](https://github.com/kevinzakka/mink).
+- [Maskedmimic](https://github.com/NVlabs/ProtoMotions): We use the retargeting pipeline in `Maskedmimic`, which based on [Mink](https://github.com/kevinzakka/mink).
+- [PHC](https://github.com/ZhengyiLuo/PHC): We incorporate the retargeting pipeline from `PHC` into our implementation.
+- [GVHMR](https://github.com/zju3dv/GVHMR): We use `GVHMR` to extract motions from videos.
