@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 setup(
     name='pbhc',
     version='0.0.1',
-    license="BSD-3-Clause",
+    license="MIT",
     packages=find_packages(),
     description='Physics-Based Humanoid motion Control (PBHC)',
     python_requires=">=3.8",
