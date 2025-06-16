@@ -1,5 +1,7 @@
 # SMPL Motion Retarget
 
+Our code incorporates the retargeting pipelines from [MaskedMimic](https://github.com/NVlabs/ProtoMotions) and [PHC](https://github.com/ZhengyiLuo/PHC) - the former is built upon the differential inverse kinematics framework [Mink](https://github.com/kevinzakka/mink), while the latter employs gradient-based optimization.
+
 ## Mink Retarget
 
 First install `poselib`:
