@@ -25,7 +25,7 @@
 
 <div id="top" align="center">
 
-<!-- [![arXiv](https://img.shields.io/badge/arXiv-2502.13013-orange)](https://arxiv.org/abs/2502.13013) -->
+[![arXiv](https://img.shields.io/badge/arXiv-2506.12851-orange)](https://arxiv.org/abs/2506.12851)
 [![](https://img.shields.io/badge/Project-%F0%9F%9A%80-pink)](https://kungfu-bot.github.io/)
 
 </div>
@@ -101,7 +101,7 @@ If you find our work helpful, please cite:
 @article{xie2025kungfubot,
   title={KungfuBot: Physics-Based Humanoid Whole-Body Control for Learning Highly-Dynamic Skills},
   author={Xie, Weiji and Han, Jinrui and Zheng, Jiakun and Li, Huanyu and Liu, Xinzhe and Shi, Jiyuan and Zhang, Weinan and Bai, Chenjia and Li, Xuelong},
-  journal={arXiv preprint},
+  journal={arXiv preprint arXiv:2506.12851},
   year={2025}
 }
 ```
