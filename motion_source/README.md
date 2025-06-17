@@ -1,5 +1,7 @@
 # Motion Source
 
+This folder describes how we collect human motion from various sources and process them to the SMPL format.
+
 ## SMPL Format
 
 SMPL format data consists of a dictionary. In details:
@@ -14,7 +16,7 @@ SMPL format data consists of a dictionary. In details:
 
 ## AMASS
 
-AMASS motions do not adopt too much processing measures.
+AMASS motions do not need further processing in this step.
 
 ## Video
 
@@ -31,10 +33,11 @@ The format of **Unitree LAFAN** dataset is `csv`. Two steps to process these dat
 python convert_lafan_pkl.py --filepath <path_to_csv> --start 0 --end 100
 ```
 - `<path_to_csv> ` is the path of csv file and does not contain `.csv`.
-- `start` is the start frame and `end` is the end frame.
+- `start` is the start frame index and `end` is the end frame index. We select the `[start:end]` frames from the csv file.
 
 2. count pkl contact mask:
  
 ```
 python count_pkl_contact_mask.py robot=unitree_g1_29dof_anneal_23dof +input_folder=<path_to_input_folder> +target_folder=<path_to_target_folder>
 ```
+- It computes the contact mask of the motion data by a thresholding method.

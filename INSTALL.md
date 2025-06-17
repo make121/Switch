@@ -30,7 +30,7 @@ pip install -e humanoidverse/isaac_utils
 ```
 
 ```bash
-# (Optional) Install additional dependencies for visualization
+# (Optional) Install additional dependencies for motion visualization with rerun (robot_motion_process/vis_rr.py)
 pip install rerun-sdk==0.22.0 trimesh
 ```
 
