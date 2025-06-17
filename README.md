@@ -127,6 +127,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Maskedmimic](https://github.com/NVlabs/ProtoMotions): We use the retargeting pipeline in `Maskedmimic`, which based on [Mink](https://github.com/kevinzakka/mink).
 - [PHC](https://github.com/ZhengyiLuo/PHC): We incorporate the retargeting pipeline from `PHC` into our implementation.
 - [GVHMR](https://github.com/zju3dv/GVHMR): We use `GVHMR` to extract motions from videos.
+- [IPMAN](https://github.com/sha2nkt/ipman-r): We filter motions based on `IPMAN` codebase.
 ## Contact
 
 Feel free to open an issue or discussion if you encounter any problems or have questions about this project.
