@@ -1,4 +1,4 @@
-from .body_model_smpl import BodyModelSMPLH
+from .body_model_smpl import BodyModelSMPLH, BodyModelSMPLX
 def make_smplx(type="neu_fullpose", **kwargs):
     if type == "smpl":
         bm_kwargs = {
@@ -22,7 +22,16 @@ def make_smplx(type="neu_fullpose", **kwargs):
             "flat_hand_mean": False,
         }
         model = BodyModelSMPLH(model_path="../body_model", **bm_kwargs)
-
+    elif type == "supermotion":
+        # SuperMotion is trained on BEDLAM dataset, the smplx config is the same except only 10 betas are used
+        bm_kwargs = {
+            "model_type": "smplx",
+            "gender": "neutral",
+            "num_pca_comps": 12,
+            "flat_hand_mean": False,
+        }
+        bm_kwargs.update(kwargs)
+        model = BodyModelSMPLX(model_path="../smpl_retarget/smpl_model", **bm_kwargs)
     else:
         raise NotImplementedError
 

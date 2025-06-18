@@ -1,6 +1,6 @@
 # SMPL Motions Visualization
 
-This folder describes how to visualize the SMPL format motion data. We provide two methods: `Blender` and `PyRender`.
+This folder describes how to visualize the SMPL format motion data. We provide two methods: `Blender` and `PyTorch3D`.
 
 ## Blender Vis
 
@@ -14,7 +14,20 @@ Import `npz` motion data into blender for visualization.
 
 ## PyRender Vis
 
-Run the following command to visualize motion through `PyRender`:
+This implementation is adapted from the `GVHMR` code, so please refer to its [installation](https://github.com/zju3dv/GVHMR/blob/main/docs/INSTALL.md) process.
+
+`smpl_neutral_J_regressor.pt` and `smplx2smpl_sparse.pt` must be put in `./body_model`. Download [SMPLX] parameters and place it in the `../smpl_retarget/smpl_model/smplx/` folder. Rename the file to `SMPLX_NEUTRAL.npz`. The folder structure of `../smpl_retarget/smpl_model` should be organized like this:
+```
+smpl_model/
+├── smpl/
+|    └── SMPL_FEMALE.pkl
+|    └── SMPL_MALE.pkl
+|    └── SMPL_NEUTRAL.pkl
+└── smplx/
+     └── SMPLX_NEUTRAL.npz
+```
+
+Run the following command to visualize motion:
 
 ```
 python smpl_render.py --filepath <PATH_TO_MOTION>

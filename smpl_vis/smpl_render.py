@@ -12,14 +12,51 @@ from smpl_sim.smpllib.smpl_parser import (
     SMPLH_Parser,
     SMPLX_Parser,
 )
+from scipy.spatial.transform import Rotation as sRot
 
 from utils.renderer import Renderer, get_global_cameras_static, get_ground_params_from_points
 
-CRF = 23 
+CRF = 23  # 17 is lossless, every +6 halves the mp4 size
 
-def render(pred_ay_verts, filename):
+def recover_rot(motion):
+    body_pose = motion['poses']
+    trans = motion['trans']
+    transform1 = sRot.from_euler('xyz', np.array([np.pi / 2, 0, np.pi]), degrees=False)
+    current_global_orient = body_pose[:, :3]
+    current_rot = sRot.from_rotvec(current_global_orient)
+
+    transform_inv = transform1.inv()
+    original_global_rot = transform_inv * current_rot
+
+    body_pose[:, :3] = original_global_rot.as_rotvec()
+    transform_matrix = transform1.as_matrix()
+
+    trans = trans @ transform_matrix
+
+    return body_pose, trans
+
+def to_cuda(data):
+    """Move data in the batch to cuda(), carefully handle data that is not tensor"""
+    if isinstance(data, torch.Tensor):
+        return data.cuda()
+    elif isinstance(data, dict):
+        return {k: to_cuda(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [to_cuda(v) for v in data]
+    else:
+        return data
+
+def render(motion, filename):
+    smplx = make_smplx("supermotion").cuda()
+    smplx2smpl = torch.load("./body_model/smplx2smpl_sparse.pt").cuda()
     J_regressor = torch.load("./body_model/smpl_neutral_J_regressor.pt").cuda()
     faces_smpl = make_smplx("smpl").faces
+
+    smplx_out = smplx(**to_cuda(motion))
+
+    N = motion['body_pose'].shape[0]
+
+    pred_ay_verts = torch.stack([torch.matmul(smplx2smpl, v_) for v_ in smplx_out.vertices])
 
     def move_to_start_point_face_z(verts):
         "XZ to origin, Start from the ground, Face-Z"
@@ -40,16 +77,14 @@ def render(pred_ay_verts, filename):
         beta=2.0,
         cam_height_degree=15,    # 20
         target_center_height=1,   # 1.0
-        vec_rot=1
+        vec_rot=1,
+        device='cuda:0',
     )
     
-    # length, width, height = get_video_lwh(video_path)
-    length, width, height = (395, 1280, 720)
+    length, width, height = (N, 1280, 720)
     _, _, K = create_camera_sensor(width, height, 24)  # render as 24mm lens
 
-    # renderer
     renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K)
-    # renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K, bin_size=0)
 
     # -- render mesh -- #
     scale, cx, cz = get_ground_params_from_points(joints_glob[:, 0], verts_glob)
@@ -70,21 +105,19 @@ def render(pred_ay_verts, filename):
         writer.write_frame(img)
     writer.close()
 
-def get_verts(motion_file, device):
-    smpl_parser_n = SMPL_Parser(model_path="../smpl_retarget/smpl_model/smpl", gender="neutral")
-
-    framerate = motion_file['mocap_framerate']
-
-    root_trans = motion_file['trans']
-    pose_aa = np.concatenate([motion_file['poses'][:, :66], np.zeros((root_trans.shape[0], 6))], axis=-1)
-    betas = motion_file['betas']
-
-    skip = int(framerate // 30)
-    trans = torch.from_numpy(root_trans[::skip])
-    pose_aa_walk = torch.from_numpy(pose_aa[::skip]).float()
-
-    verts, joints = smpl_parser_n.get_joints_verts(pose_aa_walk, torch.from_numpy(betas).unsqueeze(0), trans)
-    return verts.to(device)
+def format_motion(motion_file,fps=30):
+    N = motion_file['poses'].shape[0]
+    skip = int(motion_file['mocap_framerate'] // fps)
+    rot, transl = recover_rot(motion_file)
+    body_pose = rot[:, 3:66]
+    betas = np.tile(motion_file['betas'][:10],(N, 1))
+    global_orient = rot[:, :3]
+    return {
+        'body_pose': torch.from_numpy(body_pose[::skip]).float(),
+        'betas': torch.from_numpy(betas[::skip]).float(),
+        'global_orient': torch.from_numpy(global_orient[::skip]).float(),
+        'transl': torch.from_numpy(transl[::skip]).float()
+    }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -98,7 +131,5 @@ if __name__ == '__main__':
     assert filename.split('.')[-1] == 'npz', "must npz file"
 
     motion_file = np.load(filepath, allow_pickle = True)
-    verts = get_verts(motion_file, device)
-    verts[:,:,1], verts[:,:,2] = verts[:,:,2], verts[:,:,1]
-    render(verts, filename.split('.')[0])
-
+    motion = format_motion(motion_file)
+    render(motion, filename.split('.')[0])

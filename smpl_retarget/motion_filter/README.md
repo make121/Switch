@@ -1,6 +1,6 @@
 # Motion Filter Implementation
 
-The motion filter implementation is adapted from the official [IPMAN](https://github.com/sha2nkt/ipman-r) codebase.
+The motion filter implementation is adapted from the official [IPMAN](https://github.com/sha2nkt/ipman-r) codebase, so please refer to its installation process.
 
 ## Demo
 
