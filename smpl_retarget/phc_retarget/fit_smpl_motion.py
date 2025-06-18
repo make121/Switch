@@ -87,7 +87,7 @@ def process_motion(key_names, key_name_to_pkls, cfg):
     robot_joint_pick_idx = [robot_joint_names_augment.index(j) for j in robot_joint_pick]
     smpl_joint_pick_idx = [SMPL_BONE_ORDER_NAMES.index(j) for j in smpl_joint_pick]
 
-    smpl_parser_n = SMPL_Parser(model_path="./smpl_model", gender="neutral")
+    smpl_parser_n = SMPL_Parser(model_path="./smpl_model/smpl", gender="neutral")
     shape_new, scale = joblib.load(f"./retargeted_motion_data/phc/shape_optimized_v1.pkl")
 
     all_data = {}

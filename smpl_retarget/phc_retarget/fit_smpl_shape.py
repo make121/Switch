@@ -24,7 +24,7 @@ from smpl_sim.utils.pytorch3d_transforms import axis_angle_to_matrix
 from torch.autograd import Variable
 from tqdm.notebook import tqdm
 from smpl_sim.smpllib.smpl_joint_names import SMPL_MUJOCO_NAMES, SMPL_BONE_ORDER_NAMES, SMPLH_BONE_ORDER_NAMES, SMPLH_MUJOCO_NAMES
-from phc.utils.torch_humanoid_batch import Humanoid_Batch
+from motion_source.utils.torch_humanoid_batch import Humanoid_Batch
 from easydict import EasyDict
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -60,7 +60,7 @@ def main(cfg : DictConfig) -> None:
         pose_aa_stand[:, SMPL_BONE_ORDER_NAMES.index(modifier_key)] = sRot.from_euler("xyz", eval(modifier_value),  degrees = False).as_rotvec()
 
     pose_aa_stand = torch.from_numpy(pose_aa_stand.reshape(-1, 72))
-    smpl_parser_n = SMPL_Parser(model_path="../../motion_source/smpl", gender="neutral")
+    smpl_parser_n = SMPL_Parser(model_path="./smpl_model/smpl", gender="neutral")
 
     ###### Shape fitting
     trans = torch.zeros([1, 3])
