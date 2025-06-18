@@ -12,7 +12,7 @@ Import `npz` motion data into blender for visualization.
 
 2. Add the SMPL object to the blender scene and run the `import_motion_blender.py` script in the `scripting` bar to bind the motion data to the SMPL object.
 
-## PyRender Vis
+## PyTorch3D Vis
 
 This implementation is adapted from the `GVHMR` code, so please refer to its [installation](https://github.com/zju3dv/GVHMR/blob/main/docs/INSTALL.md) process.
 
