@@ -72,11 +72,11 @@ python humanoidverse/ratio_eps.py +device=cuda:0 +checkpoint=example/pretrained_
 
 ##  Deployment
 To deploy the policy in MuJoCo, you need to:
-- First export the policy to onnx by running the `eval_agent.py` above, the exported policy appears in the `exported` folder. We have provided the exported policy for the pretrained checkpoint in `example/pretrained_horse_stance_pose/export/model_50000.onnx`.
+- First export the policy to onnx by running the `eval_agent.py` above, the exported policy appears in the `exported` folder. We have provided the exported policy for the pretrained checkpoint in `example/pretrained_horse_stance_pose/exported/model_50000.onnx`.
 - Then run the following command to deploy the policy in MuJoCo.
 
   ```bash
-  python humanoidverse/urci.py +opt=record +simulator=mujoco +checkpoint=example/pretrained_horse_stance_pose/export/model_50000.onnx
+  python humanoidverse/urci.py +opt=record +simulator=mujoco +checkpoint=example/pretrained_horse_stance_pose/exported/model_50000.onnx
   ```
 
 - See `class MViewerPlugin` in `humanoidverse/deploy/mujoco.py` for the key mapping.
