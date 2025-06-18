@@ -45,6 +45,21 @@ def foot_detect(positions, thres=0.002):
     feet_r = np.max(feet_r, axis=1, keepdims=True)
     return feet_l, feet_r
 
+def count_pose_aa(motion):
+    dof = motion['dof']
+    root_qua = motion['root_rot']
+    dof_new = np.concatenate((dof[:, :19], dof[:, 22:26]), axis=1)
+    root_aa = sRot.from_quat(root_qua).as_rotvec()
+
+    dof_axis = np.load('../description/robots/g1/dof_axis.npy', allow_pickle=True)
+    dof_axis = dof_axis.astype(np.float32)
+
+    pose_aa = np.concatenate(
+        (np.expand_dims(root_aa, axis=1), dof_axis * np.expand_dims(dof_new, axis=2), np.zeros((dof_new.shape[0], 3, 3))),
+        axis=1).astype(np.float32)
+    
+    return pose_aa,dof_new
+
 def main(
     amass_root_dir: Path,
     robot_type: str = 'g1',
@@ -366,6 +381,9 @@ def main(
                     }
 
                     motion_data['contact_mask'] = contact_mask
+                    pose_aa,dof = count_pose_aa(motion_data)
+                    motion_data['pose_aa'] = pose_aa
+                    motion_data['dof'] = dof
 
                     output_folder_path = "./retargeted_motion_data/mink"
 
