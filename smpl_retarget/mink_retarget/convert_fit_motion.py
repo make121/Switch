@@ -69,7 +69,14 @@ def EMA_smooth(trans, alpha=0.3):
 
 def correct_motion(contact_mask, verts, trans):
     contact_indices = np.where(np.any(contact_mask != [0, 0], axis=1))[0]
-    trans[contact_indices, :, 2] -= torch.min(verts[contact_indices, :, 2],dim=1,keepdim=True)[0]
+    no_contact_indices = np.where(np.all(contact_mask == [0, 0], axis=1))[0]
+    z_offset = np.zeros_like(trans[:, :, 2])
+    z_offset[contact_indices] = torch.min(
+        verts[contact_indices, :, 2], dim=1, keepdim=True
+    )[0]
+    for idx in no_contact_indices:
+        z_offset[idx] = z_offset[idx - 1]
+    trans[:, :, 2] -= z_offset
     trans[:, :, 2] = torch.from_numpy(EMA_smooth(trans[:, :, 2]))
     # trans = torch.from_numpy(moving_average(trans))
     return trans
