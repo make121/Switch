@@ -6,6 +6,19 @@ Our code incorporates the retargeting pipelines from [MaskedMimic](https://githu
 
 Both methods can be used to retarget human motion to the robot with slightly different results. We use Mink pipeline in our experiments.
 
+## Motion Filter (Optional)
+
+Due to reconstruction inaccuracies and out-of-distribution issues in HMR models, motions extracted from videos may violate physical and biomechanical constraints. Thus, we try to filter out these motions via physics-based principles in our motion pipeline. You can choose it as an optional step.
+
+The motion filter implementation is adapted from the official [IPMAN](https://github.com/sha2nkt/ipman-r) codebase, so please refer to its installation process.
+
+Usage:
+```
+cd motion_filter
+python utils/motion_filter.py --folder <path_to_motions> --convert_rot True
+```
+- If motions are y-up, set `--convert_rot False`. If motions are z-up, set `--convert_rot True`.
+
 ## Mink Retarget
 
 First install `poselib`:
