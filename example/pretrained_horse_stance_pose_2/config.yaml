@@ -53,6 +53,9 @@ algo:
     num_learning_iterations: 1000000
     init_at_random_ep_len: true
     eval_callbacks: null
+    phase_embed:
+      type: Original
+      dim: 16
     module_dict:
       actor:
         input_dim:
@@ -95,7 +98,7 @@ env:
     terrain: ${terrain}
     obs: ${obs}
     env_spacing: 5.0
-    max_episode_length_s: 20
+    max_episode_length_s: 100000
     use_vec_reward: true
     normalization:
       clip_actions: 100.0
@@ -270,10 +273,10 @@ robot:
     fix_base_link: false
     default_dof_drive_mode: 3
     robot_type: g1_23dof_lock_wrist
-    urdf_file: g1/g1_23dof_lock_wrist.urdf
+    urdf_file: g1/${robot.asset.robot_type}.urdf
     usd_file: g1/${robot.asset.robot_type}.usd
     xml_file: g1/${robot.asset.robot_type}.xml
-    asset_root: "description/robots"
+    asset_root: description/robots
     self_collisions: 0
     filter_ints: null
   actions_dim: 23
@@ -997,10 +1000,10 @@ obs:
 domain_rand:
   push_robots: true
   push_interval_s:
-  - 5
-  - 10
-  max_push_vel_xy: 0.1
-  randomize_base_com: true
+  - 1
+  - 2
+  max_push_vel_xy: 0.03
+  randomize_base_com: false
   base_com_range:
     x:
     - -0.05
@@ -1013,8 +1016,8 @@ domain_rand:
     - 0.01
   randomize_link_mass: true
   link_mass_range:
-  - 0.9
-  - 1.1
+  - 0.98
+  - 1.02
   randomize_pd_gain: true
   kp_range:
   - 0.9
@@ -1028,7 +1031,7 @@ domain_rand:
   - 1.2
   randomize_base_mass: false
   randomize_torque_rfi: true
-  rfi_lim: 0.05
+  rfi_lim: 0.03
   randomize_rfi_lim: true
   rfi_lim_range:
   - 0.5
@@ -1038,6 +1041,17 @@ domain_rand:
   - 0
   - 2
   _push_fixed: true
+  randomize_link_com: true
+  link_com_range:
+    x:
+    - -0.01
+    - 0.01
+    'y':
+    - -0.01
+    - 0.01
+    z:
+    - -0.01
+    - 0.01
   randomize_link_body_names:
   - pelvis
   - torso_link
@@ -1063,8 +1077,8 @@ domain_rand:
   - right_ankle_roll_link
   randomize_link_inertia: true
   link_inertia_range:
-  - 0.9
-  - 1.1
+  - 0.98
+  - 1.02
   randomize_link_inertia_names:
   - pelvis
   - torso_link
@@ -1088,43 +1102,36 @@ domain_rand:
   - right_knee_link
   - right_ankle_pitch_link
   - right_ankle_roll_link
+  heavy_upper:
+    enable: false
+    ratio: 1.1
+    body_names:
+    - torso_link
+    - left_shoulder_pitch_link
+    - left_shoulder_roll_link
+    - left_shoulder_yaw_link
+    - left_elbow_link
+    - right_shoulder_pitch_link
+    - right_shoulder_roll_link
+    - right_shoulder_yaw_link
+    - right_elbow_link
+  parallel_serial_pd:
+    enable: true
+    ratio:
+    - 0.5
+    - 1.5
+    joint_idx:
+    - 4
+    - 5
+    - 10
+    - 11
+    - 13
+    - 14
   added_mass_range:
   - -5.0
   - 10.0
   use_rao: true
-  rao_lim: 0.05
-  randomize_motion_ref_xyz: false
-  motion_ref_xyz_range:
-  - - -0.02
-    - 0.02
-  - - -0.02
-    - 0.02
-  - - -0.1
-    - 0.1
-  motion_package_loss: false
-  package_loss_range:
-  - 1
-  - 10
-  package_loss_interval_s: 2
-  born_offset: false
-  born_offset_curriculum: false
-  born_offset_level_down_threshold: 50
-  born_offset_level_up_threshold: 120
-  level_degree: 5.0e-05
-  born_distance: 0.25
-  born_offset_range:
-  - 0.0
-  - 1
-  born_offset_possibility: 1.0
-  born_heading_curriculum: false
-  born_heading_randomization: false
-  born_heading_level_down_threshold: 50
-  born_heading_level_up_threshold: 120
-  born_heading_degree: 10
-  born_heading_range:
-  - 0
-  - 180
-  born_heading_level_degree: 5.0e-05
+  rao_lim: 0.1
 rewards:
   set_reward: Anonymity
   set_reward_date: 20250417
@@ -1145,8 +1152,6 @@ rewards:
     feet_air_time: 1.0
     penalty_feet_contact_forces: -0.01
     penalty_stumble: -2.0
-    penalty_feet_ori: 0
-    feet_heading_alignment: 0
     penalty_slippage: -1.0
     limits_dof_pos: -10.0
     limits_dof_vel: -5.0

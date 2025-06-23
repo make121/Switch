@@ -1,7 +1,7 @@
 
 # Policy
 
-This directory contains the source code for policy training and evaluation for PBHC. We also provide a pretrained policy for the `Horse-stance pose` motion ( at `PBHC/code/policy/example/pretrained_horse_stance_pose/model_50000.pt`).
+This directory contains the source code for policy training and evaluation for PBHC. We also provide some pretrained policies for the `Horse-stance pose` motion ( at `PBHC/code/policy/example/pretrained_horse_stance_pose`).
 
 Our code is based on the [ASAP [1]](https://github.com/LeCAR-Lab/ASAP) official codebase. Note that there are some experimental features in this codebase, which are not used anywhere. Some of them are potentially useful but we cannot guarantee the correctness and stability.
 
