@@ -19,6 +19,8 @@ Retarget command:
 python mink_retarget/convert_fit_motion.py <PATH_TO_MOTION_FOLDER>
 ```
 
+Add `--correct` will use motion correction.
+
 `<PATH_TO_MOTION_FOLDER>` is the root folder of motion data. The motion data folder should be like this:
 
 ```
