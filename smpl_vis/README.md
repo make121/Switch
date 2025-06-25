@@ -16,7 +16,7 @@ Import `npz` motion data into blender for visualization.
 
 This implementation is adapted from the `GVHMR` code, so please refer to its [installation](https://github.com/zju3dv/GVHMR/blob/main/docs/INSTALL.md) process.
 
-`smpl_neutral_J_regressor.pt` and `smplx2smpl_sparse.pt` must be put in `./body_model`. Download [SMPLX] parameters and place it in the `../smpl_retarget/smpl_model/smplx/` folder. Rename the file to `SMPLX_NEUTRAL.npz`. The folder structure of `../smpl_retarget/smpl_model` should be organized like this:
+`smpl_neutral_J_regressor.pt` and `smplx2smpl_sparse.pt` must be put in `./body_model` (These two files can be found in the [repo](https://github.com/zju3dv/GVHMR/tree/main/hmr4d/utils/body_model)). Download [SMPLX] parameters and place it in the `../smpl_retarget/smpl_model/smplx/` folder. Rename the file to `SMPLX_NEUTRAL.npz`. The folder structure of `../smpl_retarget/smpl_model` should be organized like this:
 ```
 smpl_model/
 ├── smpl/
