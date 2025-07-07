@@ -154,13 +154,13 @@ Evel (mm/frame).
     appendix = traj_data['appendix']
     
     # compute the global mpjpe
-    gmpjpe = torch.norm(pol['global_translation'] - ref['global_translation'], dim=-1).mean(dim=-1).mean()
+    gmpbpe = torch.norm(pol['global_translation'] - ref['global_translation'], dim=-1).mean(dim=-1).mean()
     
     
     # compute the root-relative mpjpe
     root_relative_position = pol['global_translation'] - pol['global_translation'][..., 0:1, :]
     root_relative_position_ref = ref['global_translation'] - ref['global_translation'][..., 0:1, :]
-    mpjpe = torch.norm(root_relative_position - root_relative_position_ref, dim=-1).mean(dim=-1).mean()
+    mpbpe = torch.norm(root_relative_position - root_relative_position_ref, dim=-1).mean(dim=-1).mean()
     
     # compute the dof mpjpe
     dof_mpjpe = torch.norm(pol['dof_pos'] - ref['dof_pos'], dim=-1).mean(dim=-1).mean()
@@ -206,15 +206,15 @@ Evel (mm/frame).
     # breakpoint()
     
     resdict = {
-        'E_gmpjpe': gmpjpe,
-        'E_mpjpe': mpjpe,
-        'E_dof_mpjpe': dof_mpjpe,
-        'E_dof_vel': dof_vel_error,
-        'E_dof_acc': dof_acc_error,
-        'E_vel': velocity_error,
-        'E_root_vel': root_velocity_error,
-        'E_acc': acceleration_error,
+        'E_gmpbpe': gmpbpe,
+        'E_mpbpe': mpbpe,
+        'E_mpjpe': dof_mpjpe,
+        'E_mpjve': dof_vel_error,
+        'E_mpjae': dof_acc_error,
+        'E_pbve': velocity_error,
+        'E_pbae': acceleration_error,
         'E_root_acc': root_acceleration_error,
+        'E_root_vel': root_velocity_error,
         
     }
     if 'contact_mask' in pol and 'contact_mask' in ref:
