@@ -104,8 +104,13 @@ def pre_process_config(config) -> None:
         if os.path.isfile(motion_file):
             with open(motion_file, 'rb') as f:
                 motion_data = joblib.load(f)
-            assert len(motion_data) == 1, 'current only support single motion tracking'
+            # assert len(motion_data) == 1, 'current only support single motion tracking'
             the_motion_data = motion_data[next(iter(motion_data))]
+            fps = the_motion_data.get("fps", None)
+            if not isinstance(fps, int):
+                logger.warning(f"Converting fps to int: {fps} -> {int(fps)}")
+                fps = int(fps)
+                the_motion_data["fps"] = fps
             assert type(the_motion_data['fps']) == int, 'motion fps should be an integer'
             config.obs.motion_len = len(the_motion_data['dof']) / the_motion_data['fps']
             config.obs.motion_file = motion_file

@@ -4,7 +4,7 @@
 <h1 align="center"><strong>KungfuBot: Physics-Based Humanoid Whole-Body Control for Learning Highly-Dynamic Skills</strong></h1>
   <p align="center">
     <a href="https://shi-soul.github.io/" target="_blank">Weiji Xie</a><sup>* 1,2</sup>,
-    <a href="https://scholar.google.com/citations?hl=zh-CN&user=mJ7tn3MAAAAJ" target="_blank">Jinrui Han</a><sup>* 1,2</sup>,
+    <a href="https://bwrooney82.github.io/" target="_blank">Jinrui Han</a><sup>* 1,2</sup>,
     <a href="#" target="_blank">Jiakun Zheng</a><sup>* 1,3</sup>,
     <a href="https://scholar.google.com/citations?user=XhAo4J0AAAAJ&hl=zh-CN" target="_blank">Huanyu Li</a><sup>1,4</sup>,
     <a href="https://xinzheliu.github.io/" target="_blank">Xinzhe Liu</a><sup>1,5</sup>,
@@ -30,12 +30,41 @@
 
 </div>
 
+<br>
+<p align="center">
+<h1 align="center"><strong>KungfuBot2: Learning Versatile Motion Skills for Humanoid Whole-Body Control</strong></h1>
+  <p align="center">
+    <a href="https://bwrooney82.github.io/" target="_blank">Jinrui Han</a><sup> 1,2</sup>,
+    <a href="https://shi-soul.github.io/" target="_blank">Weiji Xie</a><sup> 1,2</sup>,
+    <a href="#" target="_blank">Jiakun Zheng</a><sup> 1,3</sup>,
+    <a href="https://scholar.google.com/citations?user=aVte5j4AAAAJ" target="_blank">Jiyuan Shi</a><sup>1</sup>,
+    <a href="https://wnzhang.net" target="_blank">Weinan Zhang</a><sup>2</sup>,
+    <a href="https://github.com/TeleHuman/PBHC" target="_blank">Ting Xiao</a><sup>2</sup>,
+    <a href="https://baichenjia.github.io/" target="_blank">Chenjia Bai</a><sup>&dagger;1</sup>,
+    <br>
+    &dagger; Corresponding Author
+    <br>
+    <sup>1</sup>Institute of Artificial Intelligence (TeleAI), China Telecom  
+    <sup>2</sup>Shanghai Jiao Tong University  
+    <sup>3</sup>East China University of Science and Technology  
+  </p>
+</p>
+
+<div id="top" align="center">
+
+[![arXiv](https://img.shields.io/badge/arXiv-2509.16638-orange)](https://arxiv.org/pdf/2509.16638)
+[![](https://img.shields.io/badge/Project-%F0%9F%9A%80-pink)](http://kungfubot2-humanoid.github.io/)
+
+</div>
+
 ## Demo
 
 [![demo](demo.jpg "demo")]()
 
 
 ## News
+- \[2025-10\] Release support for general motion tracking.
+- \[2025-09\] KungfuBot is accepted by NeurIPS 2025!
 - \[2025-06\] We release the code and paper for PBHC.
 
 ## Contents
@@ -58,7 +87,7 @@
 [![overview](overview.jpg "overview")]()
 
 
-This is the official implementation of the paper [KungfuBot: Physics-Based Humanoid Whole-Body Control for Learning Highly-Dynamic Skills](https://kungfu-bot.github.io/).
+This is the official implementation of the paper [KungfuBot: Physics-Based Humanoid Whole-Body Control for Learning Highly-Dynamic Skills](https://kungfu-bot.github.io/), supporting general motion tracking of the paper [KungfuBot2: Learning Versatile Motion Skills for Humanoid Whole-Body Control](https://arxiv.org/pdf/2509.16638).
 
 
 Our paper introduces a physics-based control framework that enables humanoid robots to learn and reproduce challenging motions through multi-stage motion processing and adaptive policy training.
@@ -112,6 +141,13 @@ If you find our work helpful, please cite:
   journal={arXiv preprint arXiv:2506.12851},
   year={2025}
 }
+
+@article{han2025kungfubot2,
+  title={KungfuBot2: Learning Versatile Motion Skills for Humanoid Whole-Body Control},
+  author={Han, Jinrui and Xie, Weiji and Zheng, Jiakun and Shi, Jiyuan and Zhang, Weinan and Xiao, Ting and Bai, Chenjia},
+  journal={arXiv preprint arXiv:2509.16638},
+  year={2025}
+}
 ```
 
 
@@ -122,6 +158,7 @@ This codebase is under [CC BY-NC 4.0 license](https://creativecommons.org/licens
 ## Acknowledgements
 
 - [ASAP](https://github.com/LeCAR-Lab/ASAP): We use `ASAP` library to build our RL codebase.
+- [Beyondmimic](https://beyondmimic.github.io/): We incorporate `Beyondmimic` features into policy training.
 - [RSL_RL](https://github.com/leggedrobotics/rsl_rl): We use `rsl_rl` library for the PPO implementation.
 - [Unitree](https://www.unitree.com/): We use `Unitree G1` as our testbed robot.
 - [Maskedmimic](https://github.com/NVlabs/ProtoMotions): We use the retargeting pipeline in `Maskedmimic`, which based on [Mink](https://github.com/kevinzakka/mink).

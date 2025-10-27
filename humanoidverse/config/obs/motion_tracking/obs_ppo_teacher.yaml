@@ -1,0 +1,151 @@
+# @package _global_
+
+# modified from obs_ppo_teacher
+obs:
+  history_length: 10
+  future_max_steps: 95
+  future_num_steps: 20
+  masked_dof_vel: False
+  
+  obs_dict:
+    actor_obs: [
+      base_lin_vel,
+      base_ang_vel,
+      dof_pos,
+      dof_vel,
+      actions,
+      roll_pitch,
+      local_key_body_pos,
+      local_key_body_rot,
+      anchor_ref_pos,
+      anchor_ref_rot,
+      next_step_ref_motion,
+    ]
+
+    priv_obs: [ 
+      contact_mask,
+      root_height,
+      dr_base_com,
+      dr_base_mass,
+      dr_kp,
+      dr_kd,
+      dr_friction,
+    ]
+
+    future_motion_targets: [
+      future_motion_root_height,
+      future_motion_roll_pitch,
+      future_motion_base_lin_vel,
+      future_motion_base_yaw_vel,
+      future_motion_dof_pos,
+      future_motion_local_ref_key_body_pos
+    ]      
+
+    prop_history: [
+      history
+    ]
+
+
+  obs_auxiliary:
+    history:
+      base_ang_vel: ${obs.history_length}
+      roll_pitch: ${obs.history_length}
+      dof_pos: ${obs.history_length}
+      dof_vel: ${obs.history_length}
+      actions: ${obs.history_length}
+
+  obs_scales: {
+    base_lin_vel: 2.0,
+    base_ang_vel: 0.25,
+    dof_pos: 1.0,
+    dof_vel: 0.05,
+    actions: 1.0,
+    local_key_body_pos: 1.0,
+    local_key_body_rot: 1.0,
+    anchor_ref_pos: 1.0,
+    anchor_ref_rot: 1.0,
+    history: 1.0,
+    dr_base_com: 1.0,
+    dr_base_mass: 1.0,
+    dr_kp: 1.0,
+    dr_kd: 1.0,
+    dr_friction: 1.0,
+    dr_ctrl_delay: 1.0,
+    contact_mask: 1.0,
+    root_height: 1.0,
+    roll_pitch: 1.0,
+    future_motion_root_height: 1.0,
+    future_motion_roll_pitch: 1.0,
+    future_motion_base_lin_vel: 1.0,
+    future_motion_base_yaw_vel: 1.0,
+    future_motion_dof_pos: 1.0,
+    future_motion_local_ref_key_body_pos: 1.0,
+    next_step_ref_motion: 1.0,
+  }
+
+  noise_scales: {
+    base_lin_vel: 0.0,
+    base_ang_vel: 0.3,
+    dof_pos: 0.01,
+    dof_vel: 0.15,
+    actions: 0.0,
+    local_key_body_pos: 0.0,
+    local_key_body_rot: 0.0,
+    anchor_ref_pos: 0.0,
+    anchor_ref_rot: 0.0,
+    history: 0.0,
+    dr_base_com: 0.0,
+    dr_base_mass: 0.0,
+    dr_kp: 0.0,
+    dr_kd: 0.0,
+    dr_friction: 0.0,
+    dr_ctrl_delay: 0.0,
+    contact_mask: 0.0,
+    root_height: 0.0,
+    roll_pitch: 0.2,
+    future_motion_root_height: 0.0,
+    future_motion_roll_pitch: 0.0,
+    future_motion_base_lin_vel: 0.0,
+    future_motion_base_yaw_vel: 0.0,
+    future_motion_dof_pos: 0.0,
+    future_motion_local_ref_key_body_pos: 0.0,
+    next_step_ref_motion: 0.0,
+  }
+
+  add_noise_currculum: False
+  noise_initial_value: 0.05
+  noise_value_max: 1.0
+  noise_value_min: 0.00001
+  soft_dof_pos_curriculum_degree: 0.00001
+  soft_dof_pos_curriculum_level_down_threshold: 40
+  soft_dof_pos_curriculum_level_up_threshold: 42
+
+  obs_dims:
+    - base_lin_vel: 3
+    - base_ang_vel: 3
+    - dof_pos: ${robot.dof_obs_size}
+    - dof_vel: ${robot.dof_obs_size}
+    - actions: ${robot.dof_obs_size}
+    - local_key_body_pos: ${eval:'3 * ${robot.num_key_bodies}'}
+    - local_key_body_rot: ${eval:'6 * ${robot.num_key_bodies}'}
+    - anchor_ref_pos: 3
+    - anchor_ref_rot: 6
+    - dr_base_com: 3
+    - dr_base_mass: 1
+    - dr_kp: ${robot.dof_obs_size}
+    - dr_kd: ${robot.dof_obs_size}
+    - dr_friction: 1
+    - dr_ctrl_delay: 1
+    - contact_mask: 2
+    - root_height: 1
+    - roll_pitch: 2
+    - future_motion_root_height: 1
+    - future_motion_roll_pitch: 2
+    - future_motion_base_lin_vel: 3
+    - future_motion_base_yaw_vel: 1
+    - future_motion_dof_pos: ${robot.dof_obs_size}
+    - future_motion_local_ref_key_body_pos: ${eval:'3 * ${robot.num_key_bodies}'}
+    - next_step_ref_motion: ${eval:'1 + 2 + 3 + 1 + ${robot.dof_obs_size} + (3 * ${robot.num_key_bodies})'}
+
+  post_compute_config: {} # Will store values after preprocessing, don't put anything here
+  motion_len: -1

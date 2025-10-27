@@ -106,7 +106,23 @@ def main(override_config: OmegaConf):
         output_name = session.get_outputs()[0].name
         
         example_input = np.random.randn(1, actor_dim).astype(np.float32)
-        try_inferr = session.run([output_name], {input_name: example_input})
+        inputs = {input_name: example_input}
+
+        if "future_motion_targets" in config.robot.algo_obs_dim_dict:
+            future_motion_steps = config.obs.future_num_steps
+            future_motion_targets_dim = config.robot.algo_obs_dim_dict["future_motion_targets"]
+            example_future_motion_targets = np.random.randn(1, future_motion_steps * future_motion_targets_dim).astype(np.float32)
+            future_motion_targets_name = session.get_inputs()[1].name
+            inputs[future_motion_targets_name] = example_future_motion_targets
+
+        if "prop_history" in config.robot.algo_obs_dim_dict:
+            prop_history_dim = config.robot.algo_obs_dim_dict["prop_history"]
+            example_history = np.random.randn(1, prop_history_dim).astype(np.float32)
+            prop_history_name = session.get_inputs()[2].name
+            inputs[prop_history_name] = example_history
+
+        try_inferr = session.run([output_name], inputs)
+        
         assert try_inferr[0].shape == (1, action_dim), f"Action shape {try_inferr[0].shape} does not match expected shape (1, {action_dim})."
         
         def policy_fn(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:

@@ -52,6 +52,8 @@ class LeggedRobotBase(BaseTask):
         self.torques = torch.zeros(self.num_envs, self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.p_gains = torch.zeros(self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.d_gains = torch.zeros(self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        self.action_scales = torch.ones(self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
+
         self.actions = torch.zeros(self.num_envs, self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.actions_after_delay = torch.zeros(self.num_envs, self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_actions = torch.zeros(self.num_envs, self.dim_actions, dtype=torch.float, device=self.device, requires_grad=False)
@@ -69,25 +71,42 @@ class LeggedRobotBase(BaseTask):
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.simulator.robot_root_states[:, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         # joint positions offsets and PD gains
-        self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+        self.default_dof_pos = torch.zeros(
+            self.num_envs,
+            self.num_dof,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.raw_default_dof_pos = torch.zeros(
+            self.num_envs,
+            self.num_dof,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+
         for i in range(self.num_dofs):
             name = self.dof_names[i]
             angle = self.config.robot.init_state.default_joint_angles[name]
-            self.default_dof_pos[i] = angle
+            self.default_dof_pos[:, i] = angle
+            self.raw_default_dof_pos[:, i] = angle
             found = False
             for dof_name in self.config.robot.control.stiffness.keys():
                 if dof_name in name:
                     self.p_gains[i] = self.config.robot.control.stiffness[dof_name]
                     self.d_gains[i] = self.config.robot.control.damping[dof_name]
+                    if not isinstance(self.config.robot.control.action_scale, (int, float)):
+                        self.action_scales[i] = self.config.robot.control.action_scale[dof_name]
                     found = True
                     logger.debug(f"PD gain of joint {name} were defined, setting them to {self.p_gains[i]} and {self.d_gains[i]}")
             if not found:
-                self.p_gains[i] = 0.
-                self.d_gains[i] = 0.
+                self.p_gains[i] = 0.0
+                self.d_gains[i] = 0.0
                 if self.config.robot.control.control_type in ["P", "V"]:
                     logger.warning(f"PD gain of joint {name} were not defined, setting them to zero")
                     raise ValueError(f"PD gain of joint {name} were not defined. Should be defined in the yaml file.")
-        self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
+        # self.default_dof_pos = self.default_dof_pos.unsqueeze(0)
         self._init_domain_rand_buffers()
 
         # for reward penalty curriculum
@@ -600,6 +619,11 @@ class LeggedRobotBase(BaseTask):
             # self.action_queue[env_ids] = 0.
             self.action_delay_idx[env_ids] = torch.randint(self.config.domain_rand.ctrl_delay_step_range[0], 
                                             self.config.domain_rand.ctrl_delay_step_range[1]+1, (len(env_ids),), device=self.device, requires_grad=False)
+        
+        if getattr(self.config.domain_rand, "randomize_default_dof_pos", False):
+            low, high = self.config.domain_rand.dof_pos_range
+            dof_pos_bias = (high - low) * torch.rand_like(self.default_dof_pos[env_ids]) + low
+            self.default_dof_pos[env_ids] = dof_pos_bias + self.raw_default_dof_pos[env_ids]
 
     def _update_obs_noise_curriculum(self):
         if self.average_episode_length < self.config.obs.soft_dof_pos_curriculum_level_down_threshold:
@@ -769,7 +793,10 @@ class LeggedRobotBase(BaseTask):
         Returns:
             [torch.Tensor]: Torques sent to the simulation
         """
-        actions_scaled = actions * self.config.robot.control.action_scale
+        if isinstance(self.config.robot.control.action_scale, (int, float)):
+            actions_scaled = actions * self.config.robot.control.action_scale
+        else:
+            actions_scaled = actions * self.action_scales
         control_type = self.config.robot.control.control_type
         if control_type=="P":
             torques = self._kp_scale * self.p_gains*(actions_scaled + self.default_dof_pos - self.simulator.dof_pos) - self._kd_scale * self.d_gains*self.simulator.dof_vel
@@ -972,7 +999,14 @@ class LeggedRobotBase(BaseTask):
         
         # print("foot slippage", rew, '| foot_vel', torch.norm(foot_vel, dim=-1) * (torch.norm(self.simulator.contact_forces[:, self.feet_indices, :], dim=-1) > 1.))
         return rew
-
+    
+    def _reward_foot_slip_penalty(self):
+        """Penalize foot planar (xy) slip when in contact with the ground"""
+        is_contact = torch.norm(self.simulator.contact_forces[:, self.feet_indices, :], dim=-1) > 1.0
+        foot_planar_velocity = torch.linalg.norm(self.simulator._rigid_body_vel[:, self.feet_indices, :2], dim=-1)
+        reward = is_contact * foot_planar_velocity
+        return torch.sum(reward, dim=1)
+    
     def _reward_feet_max_height_for_this_air(self):
         contact = self.simulator.contact_forces[:, self.feet_indices, 2] > 1.
         contact_filt = torch.logical_or(contact, self.last_contacts) 
@@ -1147,7 +1181,9 @@ class LeggedRobotBase(BaseTask):
     def _get_obs_dr_base_com(self,):
         # breakpoint()
         return self.simulator._base_com_bias
-    
+    def _get_obs_dr_base_mass(self,):
+        # breakpoint()
+        return self.simulator._base_mass_scale
     def _get_obs_dr_link_mass(self,):
         # breakpoint()
         return self.simulator._link_mass_scale

@@ -129,7 +129,7 @@ def main(override_config: OmegaConf):
     from humanoidverse.agents.base_algo.base_algo import BaseAlgo  # noqa: E402
     from humanoidverse.utils.helpers import pre_process_config
     import torch
-    from humanoidverse.utils.inference_helpers import export_policy_as_jit, export_policy_as_onnx, export_policy_and_estimator_as_onnx
+    from humanoidverse.utils.inference_helpers import export_policy_as_jit, export_policy_as_onnx, export_policy_and_encoder_as_onnx
 
     pre_process_config(config)
 
@@ -182,7 +182,16 @@ def main(override_config: OmegaConf):
         logger.info('Exported policy as jit script to: ', os.path.join(exported_policy_path, exported_policy_name))
     if EXPORT_ONNX:
         example_obs_dict = algo.get_example_obs()
-        export_policy_as_onnx(algo.inference_model, exported_policy_path, exported_onnx_name, example_obs_dict)
+        if "ppo_mimic" in algo.__class__.__module__:
+            export_policy_and_encoder_as_onnx(
+                algo.inference_model,
+                exported_policy_path,
+                exported_onnx_name,
+                example_obs_dict,
+            )
+        else:
+            export_policy_as_onnx(algo.inference_model, exported_policy_path, exported_onnx_name, example_obs_dict)
+
         logger.info(f'Exported policy as onnx to: {os.path.join(exported_policy_path, exported_onnx_name)}')
 
     algo.evaluate_policy()

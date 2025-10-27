@@ -91,3 +91,48 @@ def export_policy_and_estimator_as_onnx(inference_model, path, exported_policy_n
             output_names=["action", "left_hand_force_estimator_output", "right_hand_force_estimator_output"],       # Name the output
             opset_version=13           # Specify the opset version, if needed
         )
+
+def export_policy_and_encoder_as_onnx(inference_model, path, exported_policy_name, example_obs_dict):
+    os.makedirs(path, exist_ok=True)
+    path = os.path.join(path, exported_policy_name)
+
+    actor = copy.deepcopy(inference_model["actor"]).to("cpu")
+
+    class PPOEncoderWrapper(nn.Module):
+        def __init__(self, actor):
+            """
+            model: The original PyTorch model.
+            input_keys: List of input names as keys for the input dictionary.
+            """
+            super(PPOEncoderWrapper, self).__init__()
+            self.actor = actor
+
+        def forward(self, inputs):
+            """
+            Dynamically creates a dictionary from the input keys and args.
+            """
+            actor_obs, future_motion_targets, history = inputs
+            motion_embedding = self.actor.motion_encoder(future_motion_targets)
+            latent = self.actor.history_encoder(history)
+            input_for_actor = torch.cat([actor_obs, motion_embedding, latent], dim=-1)
+            return self.actor.actor_module(input_for_actor)
+
+    wrapper = PPOEncoderWrapper(actor)
+    example_input_list = [
+        example_obs_dict["actor_obs"],
+        example_obs_dict["future_motion_targets"],
+        example_obs_dict["prop_history"],
+    ]
+    torch.onnx.export(
+        wrapper,
+        example_input_list,  # Pass x1 and x2 as separate inputs
+        path,
+        verbose=True,
+        input_names=[
+            "actor_obs",
+            "future_motion_targets",
+            "prop_history",
+        ],  # Specify the input names
+        output_names=["action"],  # Name the output
+        opset_version=13,  # Specify the opset version, if needed
+    )

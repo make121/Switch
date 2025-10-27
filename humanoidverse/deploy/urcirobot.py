@@ -11,8 +11,20 @@ import torch
 import os
 from pathlib import Path
 from description.robots.dtype import RobotExitException
-from isaac_utils.rotations import calc_heading_quat_inv, my_quat_rotate, calc_yaw_heading_quat_inv
-
+from isaac_utils.rotations import (
+    calc_heading_quat,
+    calc_heading_quat_inv,
+    calc_yaw_heading_quat_inv,
+    get_euler_xyz_in_tensor,
+    my_quat_rotate,
+    quat_inverse,
+    quat_mul,
+)
+from humanoidverse.utils.torch_utils import (
+    matrix_from_quat,
+    quat_apply,
+    quat_rotate_inverse,
+)
 
 URCIRobotType = TypeVar('URCIRobotType', bound='URCIRobot')
 ObsCfg = Union[DictConfig, Callable[[URCIRobotType],np.ndarray]]
@@ -82,8 +94,28 @@ class URCIRobot:
             if self.save_motion: self._make_init_save_motion()
         else: 
             self.save_motion = False
+        self.anchor_index = 0  # root
+        self.key_body_id = [4, 6, 10, 12, 19, 23, 24, 25, 26]
+        self.map_dof_to_scale()
         
-    
+    def map_dof_to_scale(self):
+        if isinstance(self.action_scale, (dict, DictConfig)):
+            scales = []
+            for name in self.dof_names:
+                if name.startswith("left_"):
+                    core = name[5:]
+                elif name.startswith("right_"):
+                    core = name[6:]
+                else:
+                    core = name
+                if core.endswith("_joint"):
+                    core = core[:-6]
+                scale = self.action_scale.get(core)
+                if scale is None:
+                    raise KeyError(f"No scale found for DOF: {name} (core={core})")
+                scales.append(scale)
+            self.action_scale = np.array(scales, dtype=np.float32)
+
     def routing(self, cfg_policies: List[URCIPolicyObs]):
         """
             Usage: Input a list of Policy, and the robot can switch between them.
@@ -203,8 +235,14 @@ class URCIRobot:
         
 
     
-    def Obs(self)->Dict[str, np.ndarray]:
-        return {'actor_obs': torch2np(self.obs_buf_dict['actor_obs']).reshape(1, -1)}
+    def Obs(self) -> Dict[str, np.ndarray]:
+        inputs = {"actor_obs": torch2np(self.obs_buf_dict["actor_obs"]).reshape(1, -1)}
+        if "future_motion_targets" in self.obs_buf_dict:
+            inputs["future_motion_targets"] = torch2np(self.obs_buf_dict["future_motion_targets"]).reshape(1, -1)
+        if "prop_history" in self.obs_buf_dict:
+            inputs["prop_history"] = torch2np(self.obs_buf_dict["prop_history"]).reshape(1, -1)
+
+        return inputs
     
     
     def _get_state(self):
@@ -259,7 +297,8 @@ class URCIRobot:
         
         noise_extra_scale = 0.
         for obs_key, obs_config in obs_cfg_obs.obs_dict.items():
-            if not obs_key=='actor_obs': continue
+            if not obs_key == "actor_obs" and not obs_key == "future_motion_targets" and not obs_key == "prop_history":
+                continue
             self.obs_buf_dict_raw[obs_key] = dict()
 
             parse_observation(self, obs_config, self.obs_buf_dict_raw[obs_key], obs_cfg_obs.obs_scales, obs_cfg_obs.noise_scales, noise_extra_scale)
@@ -267,7 +306,8 @@ class URCIRobot:
         self.obs_buf_dict = dict()
         
         for obs_key, obs_config in obs_cfg_obs.obs_dict.items():
-            if not obs_key=='actor_obs': continue
+            if not obs_key == "actor_obs" and not obs_key == "future_motion_targets" and not obs_key == "prop_history":
+                continue
             obs_keys = sorted(obs_config)
             # (Pdb) sorted(obs_config)
             # ['actions', 'base_ang_vel', 'base_lin_vel', 'dif_local_rigid_body_pos', 'dof_pos', 'dof_vel', 'dr_base_com', 'dr_ctrl_delay', 'dr_friction', 'dr_kd', 'dr_kp', 'dr_link_mass', 'history_critic', 'local_ref_rigid_body_pos', 'projected_gravity', 'ref_motion_phase']
@@ -312,7 +352,36 @@ class URCIRobot:
         
         return self._kick_motion_res_buffer
     
-    
+    def _setup_init_frame(self, motion_res: Dict[str, torch.Tensor]):
+        # Input: robot init frame, reference init frame
+        self.robot_init_yaw[0] = self.rpy[2]
+
+        # self.robot_init_frame = (np2torch(self.pos), calc_heading_quat(np2torch(self.quat).reshape(1, 4), True)[0])
+
+        self.robot_init_frame = (torch.zeros(3, dtype=torch.float32), calc_heading_quat(np2torch(self.quat).reshape(1, 4), True)[0])
+
+        self.ref_init_frame = (motion_res["root_pos"][0], calc_heading_quat(motion_res["root_rot"], True)[0])
+
+        robot_init_pos, robot_init_rot = (self.robot_init_frame[0]), (self.robot_init_frame[1])
+        ref_init_pos, ref_init_rot = (self.ref_init_frame[0]), (self.ref_init_frame[1])
+
+        ref_init_inv = quat_inverse((ref_init_rot), True)
+        q_rel = quat_mul((robot_init_rot), ref_init_inv, True)
+
+        def _fn_ref_to_robot_frame(ref_frame_anchor: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+            # Extract position and quaternion from the reference frame
+            ref_frame_pos, ref_frame_quat = ref_frame_anchor
+
+            p_rel = quat_apply(ref_init_inv, ref_frame_pos - ref_init_pos)
+            p_new = robot_init_pos + quat_apply(robot_init_rot, p_rel)
+
+            q_new = quat_mul(q_rel, ref_frame_quat, True)
+            # breakpoint()
+            return (p_new, q_new)
+
+        # self.fn_ref_to_robot_frame = lambda x:x
+        self.fn_ref_to_robot_frame = _fn_ref_to_robot_frame
+
     # @_prof_getmotion
     def KickMotionLib(self):
         # motion_time x motion lib -> ref state  for obs
@@ -321,7 +390,10 @@ class URCIRobot:
         motion_res =  self._kick_motion_res()
             # (Pdb) motion_res.keys()
             # dict_keys(['contact_mask', 'root_pos', 'root_rot', 'dof_pos', 'root_vel', 'root_ang_vel', 'dof_vel', 'motion_aa', 'motion_bodies', 'rg_pos', 'rb_rot', 'body_vel', 'body_ang_vel', 'rg_pos_t', 'rg_rot_t', 'body_vel_t', 'body_ang_vel_t'])
-
+        if "future_num_steps" in self._obs_cfg_obs and self._obs_cfg_obs.future_num_steps > 0:
+            self._get_future_motion_targets()
+        if self.timer == 0:
+            self._setup_init_frame(motion_res)
         current_yaw = self.rpy[2]
         self.relyaw = current_yaw - self.ref_init_yaw
         
@@ -336,7 +408,8 @@ class URCIRobot:
         ref_joint_pos = motion_res["dof_pos"] # [num_envs, num_dofs]
         ref_joint_vel = motion_res["dof_vel"] # [num_envs, num_dofs]
         ref_body_vel_extend = motion_res["body_vel_t"] # [num_envs, num_markers, 3]
-        
+        ref_root_rot = motion_res["root_rot"]  # [1, 4] # xyzw
+        ref_root_pos = motion_res["root_pos"]  # [1, 3]
         
         global_ref_body_vel = ref_body_vel_extend.view(1, -1, 3)
         local_ref_rigid_body_vel_flat = my_quat_rotate(heading_inv_rot_expand.view(-1, 4), global_ref_body_vel.view(-1, 3))
@@ -350,6 +423,16 @@ class URCIRobot:
         self._obs_local_ref_rigid_body_pos_relyaw = my_quat_rotate(relyaw_heading_inv_quat_expand.view(-1, 4), 
                                                                    global_ref_body_vel.view(-1, 3)).view(-1)
         
+        ref_frame_anchor = (ref_root_pos[0], ref_root_rot[0])
+        robot_frame_anchor = self.fn_ref_to_robot_frame(ref_frame_anchor)
+        root_quat = np2torch(self.quat)  # xyzw
+        self._obs_anchor_ref_rot = matrix_from_quat(
+            quat_mul(
+                quat_inverse(root_quat, w_last=True),
+                robot_frame_anchor[1].squeeze(0),
+                w_last=True,
+            )
+        )[..., :2].reshape(-1)
         # print("motion_res['root_rot']", motion_res['root_rot']);        breakpoint()
         return
 
@@ -427,6 +510,7 @@ class URCIRobot:
         self.history_handler = HistoryHandler(1, self.cfg.obs.obs_auxiliary, self.cfg.obs.obs_dims, self.device)
         
         self.motion_lib = None
+        self.robot_init_yaw = np.zeros(1, dtype=np.float32)
         self.ref_init_yaw = np.zeros(1,dtype=np.float32)
         self.relyaw = np.zeros(1,dtype=np.float32)
         self.dif_joint_angles = torch.zeros(self.num_dofs, dtype=torch.float32)
@@ -434,6 +518,17 @@ class URCIRobot:
         self._obs_global_ref_body_vel = torch.zeros(27*3, dtype=torch.float32)  # 27 rigid bodies, each has 3 velocity components
         self._obs_local_ref_rigid_body_vel = torch.zeros(27*3, dtype=torch.float32)
         self._obs_local_ref_rigid_body_pos_relyaw = torch.zeros(27*3, dtype=torch.float32)
+        self._obs_future_motion_root_height = torch.zeros(1, dtype=torch.float32)
+        self._obs_future_motion_roll_pitch = torch.zeros(2, dtype=torch.float32)
+        self._obs_future_motion_base_lin_vel = torch.zeros(3, dtype=torch.float32)
+        self._obs_future_motion_base_ang_vel = torch.zeros(3, dtype=torch.float32)
+        self._obs_future_motion_base_yaw_vel = torch.zeros(1, dtype=torch.float32)
+        self._obs_future_motion_dof_pos = torch.zeros(23, dtype=torch.float32)
+        self._obs_future_motion_local_ref_rigid_body_pos = torch.zeros(27 * 3, dtype=torch.float32)
+        self._obs_future_motion_local_ref_key_body_pos = torch.zeros(9 * 3, dtype=torch.float32)
+        self._obs_next_step_ref_motion = torch.zeros(111, dtype=torch.float32)
+        self._obs_anchor_ref_pos = torch.zeros(3, dtype=torch.float32)
+        self._obs_anchor_ref_rot = torch.zeros(6, dtype=torch.float32)
         ...
         
     def _make_motionlib(self, cfg_policies: List[URCIPolicyObs]):
@@ -564,7 +659,9 @@ class URCIRobot:
         # raise NotImplementedError("Not Implemented")
         # return np2torch(self.vel)
         # print("Warning! base_lin_vel is not allowed to access")
-        return torch.zeros(3)
+        # return torch.zeros(3)
+        root_quat = np2torch(self.quat)
+        return quat_rotate_inverse(root_quat.unsqueeze(0), torch.from_numpy(self.vel).to(dtype=torch.float32).unsqueeze(0)).view(-1)
     
     def _get_obs_base_ang_vel(self,):
         return np2torch(self.omega)
@@ -699,3 +796,89 @@ class URCIRobot:
             history_tensor = history_tensor.reshape(history_tensor.shape[0], -1)
             history_tensors.append(history_tensor)
         return torch.cat(history_tensors, dim=1).reshape(-1)
+    
+    def _get_obs_roll_pitch(self):
+        return torch.from_numpy(self.rpy[:2]).to(dtype=torch.float32)
+
+    def _get_future_motion_targets(
+        self,
+    ):
+        self.tar_obs_steps = torch.linspace(
+            start=1,
+            end=self._obs_cfg_obs.future_max_steps,
+            steps=self._obs_cfg_obs.future_num_steps,
+            device=self.device,
+            dtype=torch.long,
+        )
+        num_steps = self.tar_obs_steps.numel()
+        obs_motion_times = self.tar_obs_steps * self.dt + self.motion_time
+        motion_ids = torch.zeros(num_steps, dtype=torch.int, device=self.device)
+        motion_res = self.motion_lib.get_motion_state(motion_ids, obs_motion_times)
+
+        root_rot = motion_res["root_rot"]
+        root_pos = motion_res["root_pos"]
+        root_vel = motion_res["root_vel"]
+        root_ang_vel = motion_res["root_ang_vel"]
+        dof_pos = motion_res["dof_pos"]
+        ref_body_pos_extend = motion_res["rg_pos_t"]
+        ref_body_rot_extend = motion_res["rg_rot_t"]
+
+        flat_root_rot = root_rot.reshape(num_steps, 4)
+        flat_root_vel = root_vel.reshape(num_steps, 3)
+        flat_root_ang_vel = root_ang_vel.reshape(num_steps, 3)
+
+        rpy = get_euler_xyz_in_tensor(flat_root_rot)
+        roll_pitch = rpy[:, :2].reshape(num_steps, 2)
+
+        root_vel = quat_rotate_inverse(flat_root_rot, flat_root_vel).view(num_steps, 3)
+        root_ang_vel = quat_rotate_inverse(flat_root_rot, flat_root_ang_vel).view(num_steps, 3)
+
+        robot_anchor_pos_w_repeat = ref_body_pos_extend[..., self.anchor_index, :][..., None, :].repeat(1, 27, 1)
+        robot_anchor_quat_w_repeat = ref_body_rot_extend[..., self.anchor_index, :][..., None, :].repeat(1, 27, 1)
+        local_ref_key_body_pos = quat_apply(
+            quat_inverse(robot_anchor_quat_w_repeat, w_last=True),
+            ref_body_pos_extend - robot_anchor_pos_w_repeat,
+        )[..., self.key_body_id, :].reshape(num_steps, -1)
+
+        self._obs_future_motion_root_height = root_pos[..., 2:3].reshape(1, -1)
+        self._obs_future_motion_roll_pitch = roll_pitch.reshape(1, -1)
+        self._obs_future_motion_base_lin_vel = root_vel.reshape(1, -1)
+        self._obs_future_motion_base_ang_vel = root_ang_vel.reshape(1, -1)
+        self._obs_future_motion_base_yaw_vel = root_ang_vel[..., 2:3].reshape(1, -1)
+        self._obs_future_motion_dof_pos = dof_pos.reshape(1, -1)
+        self._obs_future_motion_local_ref_key_body_pos = local_ref_key_body_pos.reshape(1, -1)
+        self._obs_next_step_ref_motion = torch.cat(
+            (   root_pos[0, 2:3].view(-1),
+                roll_pitch[0, :].view(-1),
+                root_vel[0, :].view(-1),
+                root_ang_vel[0, 2:3].view(-1),
+                dof_pos[0, :].view(-1),
+                local_ref_key_body_pos[0, :].view(-1),),dim=-1)
+            
+
+    def _get_obs_future_motion_root_height(self):
+        return self._obs_future_motion_root_height
+
+    def _get_obs_future_motion_roll_pitch(self):
+        return self._obs_future_motion_roll_pitch
+
+    def _get_obs_future_motion_base_lin_vel(self):
+        return self._obs_future_motion_base_lin_vel
+
+    def _get_obs_future_motion_base_yaw_vel(self):
+        return self._obs_future_motion_base_yaw_vel
+
+    def _get_obs_future_motion_dof_pos(self):
+        return self._obs_future_motion_dof_pos
+
+    def _get_obs_future_motion_local_ref_key_body_pos(self):
+        return self._obs_future_motion_local_ref_key_body_pos
+
+    def _get_obs_next_step_ref_motion(self):
+        return self._obs_next_step_ref_motion
+
+    def _get_obs_anchor_ref_pos(self):
+        return self._obs_anchor_ref_pos
+
+    def _get_obs_anchor_ref_rot(self):
+        return self._obs_anchor_ref_rot

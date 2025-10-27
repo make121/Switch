@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+  - /algo: ppo_mimic
+  - /env: general_tracking
+
+experiment_name: TEST_General_Tracking

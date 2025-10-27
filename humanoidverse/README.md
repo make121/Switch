@@ -93,3 +93,61 @@ To deploy the policy in real-world robot, you need to:
   - Test in a controlled environment with safety measures in place (e.g., emergency stop button, safe zone barriers).
   - Verify joint limits, velocity/acceleration caps, and torque constraints in the control code before execution.
   - Use slow motion or small torque settings during initial trials.
+
+
+## General motion Policy Training
+To train a teacher policy, you can use the following command.
+- Change the `robot.motion.motion_file` in the command below to the motion you want to train.
+- Change the `num_envs`. We set it to `4096` for training, but you can set it to `128` for debugging.
+
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=general_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=128 \
++obs=motion_tracking/obs_ppo_teacher \
++robot=g1/g1_23dof_general \
++domain_rand=main \
++rewards=motion_tracking/general_main \
+experiment_name=debug-teacher \
+robot.motion.motion_file="<path to your motion data>" \
+seed=1 \
++device=cuda:0
+```
+
+To train a student policy, you can use the following command.
+
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=general_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=128 \
++obs=motion_tracking/obs_ppo_student \
++robot=g1/g1_23dof_general \
++domain_rand=main \
++rewards=motion_tracking/general_main \
+experiment_name=debug-student \
+robot.motion.motion_file="<path to your motion data>" \
+algo.config.dagger_only=True \
+algo.config.teacher_model_path="<path to your teacher ckpt>" \
+seed=1 \
++device=cuda:0
+```
+
+To evaluate a policy, you can use the following command.
+
+```bash
+python humanoidverse/eval_agent.py \
++device=cuda:0 \
++env.config.enforce_randomize_motion_start_eval=False \
++checkpoint="<path to your ckpt>"
+```
+
+Note: If you want to export the policy to onnx model, the function `export_policy_as_onnx` is replaced by `export_policy_and_encoder_as_onnx`.
+
+
+Run the following command to deploy the policy in MuJoCo.
+
+```bash
+python humanoidverse/urci.py +opt=record +simulator=mujoco +checkpoint="<path to your onnx>" \ 
++robot.motion.motion_file="example/motion_data" \
++robot.asset.xml_file=g1/g1_23dof_lock_wrist_rev_2.xml
+```

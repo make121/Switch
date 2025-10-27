@@ -8,13 +8,13 @@ distribution of this software and related documentation without an express
 license agreement from NVIDIA CORPORATION is strictly prohibited.
 """
 
-import torch
 import numpy as np
+import torch
 
 ######################## Quaternion: XYZW #################################
 
 
-def to_torch(x, dtype=torch.float, device='cuda:0', requires_grad=False):
+def to_torch(x, dtype=torch.float, device="cuda:0", requires_grad=False):
     return torch.tensor(x, dtype=dtype, device=device, requires_grad=requires_grad)
 
 
@@ -62,11 +62,9 @@ def quat_rotate(q, v):
     shape = q.shape
     q_w = q[:, -1]
     q_vec = q[:, :3]
-    a = v * (2.0 * q_w ** 2 - 1.0).unsqueeze(-1)
+    a = v * (2.0 * q_w**2 - 1.0).unsqueeze(-1)
     b = torch.cross(q_vec, v, dim=-1) * q_w.unsqueeze(-1) * 2.0
-    c = q_vec * \
-        torch.bmm(q_vec.view(shape[0], 1, 3), v.view(
-            shape[0], 3, 1)).squeeze(-1) * 2.0
+    c = q_vec * torch.bmm(q_vec.view(shape[0], 1, 3), v.view(shape[0], 3, 1)).squeeze(-1) * 2.0
     return a + b + c
 
 
@@ -75,10 +73,9 @@ def quat_rotate_inverse(q, v):
     shape = q.shape
     q_w = q[:, -1]
     q_vec = q[:, :3]
-    a = v * (2.0 * q_w ** 2 - 1.0).unsqueeze(-1)
+    a = v * (2.0 * q_w**2 - 1.0).unsqueeze(-1)
     b = torch.cross(q_vec, v, dim=-1) * q_w.unsqueeze(-1) * 2.0
-    c = q_vec * \
-        torch.bmm(q_vec.view(shape[0], 1, 3), v.view(shape[0], 3, 1)).squeeze(-1) * 2.0
+    c = q_vec * torch.bmm(q_vec.view(shape[0], 1, 3), v.view(shape[0], 3, 1)).squeeze(-1) * 2.0
     return a - b + c
 
 
@@ -133,13 +130,12 @@ def get_basis_vector(q, v):
     return quat_rotate(q, v)
 
 
-def get_axis_params(value, axis_idx, x_value=0., dtype=np.float64, n_dims=3):
-    """construct arguments to `Vec` according to axis index.
-    """
+def get_axis_params(value, axis_idx, x_value=0.0, dtype=np.float64, n_dims=3):
+    """construct arguments to `Vec` according to axis index."""
     zs = np.zeros((n_dims,))
     assert axis_idx < n_dims, "the axis dim should be within the vector dimensions"
-    zs[axis_idx] = 1.
-    params = np.where(zs == 1., value, zs)
+    zs[axis_idx] = 1.0
+    params = np.where(zs == 1.0, value, zs)
     params[0] = x_value
     return list(params.astype(dtype))
 
@@ -156,22 +152,19 @@ def get_euler_xyz(q):
     qx, qy, qz, qw = 0, 1, 2, 3
     # roll (x-axis rotation)
     sinr_cosp = 2.0 * (q[:, qw] * q[:, qx] + q[:, qy] * q[:, qz])
-    cosr_cosp = q[:, qw] * q[:, qw] - q[:, qx] * \
-        q[:, qx] - q[:, qy] * q[:, qy] + q[:, qz] * q[:, qz]
+    cosr_cosp = q[:, qw] * q[:, qw] - q[:, qx] * q[:, qx] - q[:, qy] * q[:, qy] + q[:, qz] * q[:, qz]
     roll = torch.atan2(sinr_cosp, cosr_cosp)
 
     # pitch (y-axis rotation)
     sinp = 2.0 * (q[:, qw] * q[:, qy] - q[:, qz] * q[:, qx])
-    pitch = torch.where(torch.abs(sinp) >= 1, copysign(
-        np.pi / 2.0, sinp), torch.asin(sinp))
+    pitch = torch.where(torch.abs(sinp) >= 1, copysign(np.pi / 2.0, sinp), torch.asin(sinp))
 
     # yaw (z-axis rotation)
     siny_cosp = 2.0 * (q[:, qw] * q[:, qz] + q[:, qx] * q[:, qy])
-    cosy_cosp = q[:, qw] * q[:, qw] + q[:, qx] * \
-        q[:, qx] - q[:, qy] * q[:, qy] - q[:, qz] * q[:, qz]
+    cosy_cosp = q[:, qw] * q[:, qw] + q[:, qx] * q[:, qx] - q[:, qy] * q[:, qy] - q[:, qz] * q[:, qz]
     yaw = torch.atan2(siny_cosp, cosy_cosp)
 
-    return roll % (2*np.pi), pitch % (2*np.pi), yaw % (2*np.pi)
+    return roll % (2 * np.pi), pitch % (2 * np.pi), yaw % (2 * np.pi)
 
 
 @torch.jit.script
@@ -192,8 +185,8 @@ def quat_from_euler_xyz(roll, pitch, yaw):
 
 
 @torch.jit.script
-def quat_from_euler_xyz_better(rpy:torch.Tensor):
-# def quat_from_euler_xyz(roll, pitch, yaw):
+def quat_from_euler_xyz_better(rpy: torch.Tensor):
+    # def quat_from_euler_xyz(roll, pitch, yaw):
     roll, pitch, yaw = torch.unbind(rpy, dim=-1)
     cy = torch.cos(yaw * 0.5)
     sy = torch.sin(yaw * 0.5)
@@ -208,6 +201,7 @@ def quat_from_euler_xyz_better(rpy:torch.Tensor):
     qz = sy * cr * cp - cy * sr * sp
 
     return torch.stack([qx, qy, qz, qw], dim=-1)
+
 
 @torch.jit.script
 def torch_rand_float(lower, upper, shape, device):
@@ -229,7 +223,7 @@ def tensor_clamp(t, min_t, max_t):
 
 @torch.jit.script
 def scale(x, lower, upper):
-    return (0.5 * (x + 1.0) * (upper - lower) + lower)
+    return 0.5 * (x + 1.0) * (upper - lower) + lower
 
 
 @torch.jit.script
@@ -239,3 +233,64 @@ def unscale(x, lower, upper):
 
 def unscale_np(x, lower, upper):
     return (2.0 * x - upper - lower) / (upper - lower)
+
+
+@torch.jit.script
+def yaw_quat(quat: torch.Tensor, w_last: bool = True) -> torch.Tensor:
+    shape = quat.shape
+    quat_flat = quat.view(-1, 4)
+
+    if w_last:
+        qx, qy, qz, qw = (
+            quat_flat[:, 0],
+            quat_flat[:, 1],
+            quat_flat[:, 2],
+            quat_flat[:, 3],
+        )
+    else:
+        qw, qx, qy, qz = (
+            quat_flat[:, 0],
+            quat_flat[:, 1],
+            quat_flat[:, 2],
+            quat_flat[:, 3],
+        )
+
+    yaw = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+
+    quat_yaw = torch.zeros_like(quat_flat)
+
+    if w_last:
+        quat_yaw[:, 2] = torch.sin(yaw / 2)  # z
+        quat_yaw[:, 3] = torch.cos(yaw / 2)  # w
+    else:
+        quat_yaw[:, 0] = torch.cos(yaw / 2)  # w
+        quat_yaw[:, 3] = torch.sin(yaw / 2)  # z
+
+    quat_yaw = normalize(quat_yaw)
+    return quat_yaw.view(shape)
+
+
+@torch.jit.script
+def matrix_from_quat(quaternions: torch.Tensor, w_last: bool = False) -> torch.Tensor:
+    if w_last:
+        i, j, k, r = torch.unbind(quaternions, -1)
+    else:
+        r, i, j, k = torch.unbind(quaternions, -1)
+
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))

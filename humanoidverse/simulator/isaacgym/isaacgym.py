@@ -236,6 +236,8 @@ class IsaacGym(BaseSimulator):
         self.friction_coeffs = torch.ones(self.num_envs, 1, 1, dtype=torch.float, device=self.device, requires_grad=False)
         self.restitution_coeffs = torch.ones(self.num_envs, 1, 1, dtype=torch.float, device=self.device, requires_grad=False)
         self._link_mass_scale = torch.ones(self.num_envs, len(self.env_config.domain_rand.randomize_link_body_names), dtype=torch.float, device=self.device, requires_grad=False)
+        self._base_mass_scale = torch.ones(self.num_envs, 1, dtype=torch.float, device=self.device, requires_grad=False)
+
         # with Progress() as progress:
         #     task = progress.add_task(
         #         f"Creating {self.num_envs} environments...", total=self.num_envs
@@ -384,6 +386,10 @@ class IsaacGym(BaseSimulator):
 
                 self.dof_pos_limits_termination[i, 0] = m - 0.5 * r * self.env_config.termination_scales.termination_close_to_dof_pos_limit
                 self.dof_pos_limits_termination[i, 1] = m + 0.5 * r * self.env_config.termination_scales.termination_close_to_dof_pos_limit
+
+        dof_armature = [self.env_config.robot.control.dof_armature.get(name, 0.0) for name in self.dof_names]
+        for i in range(len(props)):
+            props["armature"][i] = dof_armature[i]
         return props
     def _process_rigid_body_props(self, props, env_id):
         def _perturb_inertia(inertia, rand_range):
@@ -538,8 +544,9 @@ class IsaacGym(BaseSimulator):
             assert base_index != -1
             # raise Exception("index 0 is for world, 13 is for torso!")
             # raise NotImplementedError
-            props[base_index].mass += np.random.uniform(rng[0], rng[1])
-
+            rand_mass = np.random.uniform(rng[0], rng[1])
+            props[base_index].mass += rand_mass
+            self._base_mass_scale[env_id] = rand_mass
         if env_id<3:
             sum_mass = 0
             for i in range(len(props)):

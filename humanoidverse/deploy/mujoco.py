@@ -488,15 +488,19 @@ class MujocoRobot(URCIRobot, ViewerPlugin):
         # breakpoint()
 
     def Obs(self):
-        
         # return {k: torch2np(v) for k, v in self.obs_buf_dict.items()}
-        
-        actor_obs = torch2np(self.obs_buf_dict['actor_obs']).reshape(1, -1)
+
+        actor_obs = torch2np(self.obs_buf_dict["actor_obs"]).reshape(1, -1)
         if self.RAND_NOISE:
             actor_obs = MujocoRobot.mk_rand_noise(actor_obs, MujocoRobot.noise_ratio)
-        return {
-            'actor_obs': actor_obs
-            }
+
+        inputs = {"actor_obs": actor_obs}
+
+        if "future_motion_targets" in self.obs_buf_dict:
+            inputs["future_motion_targets"] = torch2np(self.obs_buf_dict["future_motion_targets"]).reshape(1, -1)
+        if "prop_history" in self.obs_buf_dict:
+            inputs["prop_history"] = torch2np(self.obs_buf_dict["prop_history"]).reshape(1, -1)
+        return inputs
         
 
     def _get_motion_to_save_torch(self)->Tuple[float, Dict[str, torch.Tensor]]:
