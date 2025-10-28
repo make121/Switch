@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 from humanoidverse.agents.modules.encoder_modules import ConvEncoder
-from .modules import BaseModule, MoEMLP
+from .modules import BaseModule
 
 
 class Actor(nn.Module):
@@ -23,8 +23,6 @@ class Actor(nn.Module):
 
         if self.actor_net_type == "MLP":
             self.actor_module = BaseModule(obs_dim_dict, actor_module_config_dict)
-        elif self.actor_net_type == "MoEMLP":
-            self.actor_module = MoEMLP(obs_dim_dict, actor_module_config_dict)
         else:
             raise NotImplementedError
 
@@ -98,8 +96,6 @@ class ActorCritic(nn.Module):
         self.critic_net_type = critic_module_config_dict.get("type", "MLP")
         if self.critic_net_type == "MLP":
             self.critic_module = BaseModule(obs_dim_dict, critic_module_config_dict)
-        elif self.critic_net_type == "MoEMLP":
-            self.critic_module = MoEMLP(obs_dim_dict, critic_module_config_dict)
         else:
             raise NotImplementedError
 

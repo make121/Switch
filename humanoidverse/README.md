@@ -148,6 +148,6 @@ Run the following command to deploy the policy in MuJoCo.
 
 ```bash
 python humanoidverse/urci.py +opt=record +simulator=mujoco +checkpoint="<path to your onnx>" \ 
-+robot.motion.motion_file="example/motion_data" \
++robot.motion.motion_file="<path to your motion data>" \
 +robot.asset.xml_file=g1/g1_23dof_lock_wrist_rev_2.xml
 ```

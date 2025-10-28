@@ -386,10 +386,10 @@ class IsaacGym(BaseSimulator):
 
                 self.dof_pos_limits_termination[i, 0] = m - 0.5 * r * self.env_config.termination_scales.termination_close_to_dof_pos_limit
                 self.dof_pos_limits_termination[i, 1] = m + 0.5 * r * self.env_config.termination_scales.termination_close_to_dof_pos_limit
-
-        dof_armature = [self.env_config.robot.control.dof_armature.get(name, 0.0) for name in self.dof_names]
-        for i in range(len(props)):
-            props["armature"][i] = dof_armature[i]
+        if hasattr(self.env_config.robot.control, "dof_armature"):
+            dof_armature = [self.env_config.robot.control.dof_armature.get(name, 0.0) for name in self.dof_names]
+            for i in range(len(props)):
+                props["armature"][i] = dof_armature[i]
         return props
     def _process_rigid_body_props(self, props, env_id):
         def _perturb_inertia(inertia, rand_range):
