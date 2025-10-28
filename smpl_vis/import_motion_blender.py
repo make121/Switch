@@ -45,10 +45,10 @@ for frame_idx in range(len(poses)):
     for bone in bone_list:
         bone = body.pose.bones[bone]
         bone.rotation_mode = 'XYZ'
-        if bone=='Pelvis':
-            bone.rotation_euler = (sRot.from_rotvec(pose[:3]) * sRot.from_euler('xyz', np.array([np.pi / 2, 0, np.pi]))).as_rotvec()
+        if bone.name =='Pelvis':
+            bone.rotation_euler = (sRot.from_rotvec(pose[:3]) * sRot.from_euler('xyz', np.array([np.pi / 2, 0, np.pi]))).as_euler()
         else:
-            bone.rotation_euler = (pose[i*3], pose[i*3+1], pose[i*3+2])
+            bone.rotation_euler = (sRot.from_rotvec(pose[i*3:i*3+3])).as_euler('xyz')
         bone.keyframe_insert(data_path="rotation_euler", frame=frame_idx)
         i+=1
 
