@@ -41,3 +41,9 @@ python convert_lafan_pkl.py --filepath <path_to_csv> --start 0 --end 100
 python count_pkl_contact_mask.py robot=unitree_g1_29dof_anneal_23dof +input_folder=<path_to_input_folder> +target_folder=<path_to_target_folder>
 ```
 - It computes the contact mask of the motion data by a thresholding method.
+
+## Motion Package
+We use `motion_package.py` to merge multiple motions into one single motion file.
+```
+python motion_package.py  <path_to_your_motion_folder> 
+```

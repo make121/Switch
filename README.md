@@ -138,7 +138,7 @@ If you find our work helpful, please cite:
 @article{xie2025kungfubot,
   title={KungfuBot: Physics-Based Humanoid Whole-Body Control for Learning Highly-Dynamic Skills},
   author={Xie, Weiji and Han, Jinrui and Zheng, Jiakun and Li, Huanyu and Liu, Xinzhe and Shi, Jiyuan and Zhang, Weinan and Bai, Chenjia and Li, Xuelong},
-  journal={arXiv preprint arXiv:2506.12851},
+  journal={Advances in Neural Information Processing Systems},
   year={2025}
 }
 
