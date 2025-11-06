@@ -271,7 +271,7 @@ def yaw_quat(quat: torch.Tensor, w_last: bool = True) -> torch.Tensor:
 
 
 @torch.jit.script
-def matrix_from_quat(quaternions: torch.Tensor, w_last: bool = False) -> torch.Tensor:
+def matrix_from_quat(quaternions: torch.Tensor, w_last: bool = True) -> torch.Tensor:
     if w_last:
         i, j, k, r = torch.unbind(quaternions, -1)
     else:

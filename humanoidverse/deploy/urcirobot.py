@@ -431,7 +431,8 @@ class URCIRobot:
                 quat_inverse(root_quat, w_last=True),
                 robot_frame_anchor[1].squeeze(0),
                 w_last=True,
-            )
+            ),
+            w_last=True,
         )[..., :2].reshape(-1)
         # print("motion_res['root_rot']", motion_res['root_rot']);        breakpoint()
         return

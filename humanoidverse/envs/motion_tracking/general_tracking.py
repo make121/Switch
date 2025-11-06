@@ -773,7 +773,8 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
                 quat_inverse(robot_anchor_quat_w_repeat, w_last=True),
                 self._rigid_body_rot_extend,
                 w_last=True,
-            )
+            ),
+            w_last=True,
         )[..., :2]
         self._obs_local_body_pos = quat_apply(
             quat_inverse(robot_anchor_quat_w_repeat, w_last=True),
@@ -785,7 +786,8 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
                 quat_inverse(self._rigid_body_rot_extend[:, self.anchor_index, :], w_last=True),
                 ref_body_rot_extend[:, self.anchor_index, :],
                 w_last=True,
-            )
+            ),
+            w_last=True,
         )[..., :2]
 
         self._obs_anchor_ref_pos = quat_apply(
