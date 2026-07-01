@@ -147,8 +147,7 @@ class MotionLibBase():
                      random_sample=True, 
                      start_idx=0, 
                      max_len=-1, 
-                     target_heading = None):
-        assert target_heading is None, "Not Allowed to use target_heading!"
+                     target_heading = np.array([0, 0, 0, 1.0])):
         # import ipdb; ipdb.set_trace()
 
         class FakeCat:
@@ -355,8 +354,11 @@ class MotionLibBase():
                 from scipy.spatial.transform import Rotation as sRot
                 # forbidden(lambda :0)()
                 start_root_rot = sRot.from_rotvec(pose_aa[0, 0])
-                heading_inv_rot = sRot.from_quat(calc_heading_quat_inv(torch.from_numpy(start_root_rot.as_quat()[None, ]),True))
-                heading_delta = sRot.from_quat(target_heading) * heading_inv_rot 
+                # Use Euler Z (yaw) instead of calc_heading which fails for tilted pelvis
+                # calc_heading projects +X onto XY plane — breaks when pelvis modifier tilts X→Z
+                yaw = start_root_rot.as_euler('xyz')[2]
+                heading_inv_rot = sRot.from_euler('z', -yaw)
+                heading_delta = sRot.from_quat(target_heading) * heading_inv_rot
                 pose_aa[:, 0] = torch.tensor((heading_delta * sRot.from_rotvec(pose_aa[:, 0])).as_rotvec())
 
                 trans = torch.matmul(trans.to(torch.float64), torch.from_numpy(heading_delta.as_matrix().squeeze().T))

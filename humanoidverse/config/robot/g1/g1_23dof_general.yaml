@@ -227,6 +227,8 @@ robot:
 
   motion:
     motion_lib_type: 'origin'
+    cross_skill_sampling_enable: true  # SG weighted cross-skill sampling switch
+    cross_skill_ratio: 0.             # fraction of envs for transition trajectories
     motion_file : ???
     asset:
       assetRoot: "description/robots/g1/"

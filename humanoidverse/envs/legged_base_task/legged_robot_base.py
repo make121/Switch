@@ -338,7 +338,9 @@ class LeggedRobotBase(BaseTask):
                 self._draw_debug_vis()
     
     def _setup_simulator_next_task(self):
-        pass
+        if hasattr(self, 'request_next_task') and self.request_next_task:
+            self.request_next_task = False
+            self.next_task()
 
     def _setup_simulator_control(self):
         pass

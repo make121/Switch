@@ -17,13 +17,13 @@ from humanoidverse.utils.config_utils import *  # noqa: E402, F403
 from loguru import logger
 
 import threading
-# from pynput import keyboard
+from pynput import keyboard
 
 def on_press(key, env):
     try:
         if key.char == 'n':
-            env.next_task()
-            logger.info("Moved to the next task.")
+            env.request_next_task = True
+            logger.info("Requested next task (will execute at safe point).")
         # Force Control
        # Force Control
         if hasattr(key, 'char'):
@@ -43,7 +43,6 @@ def on_press(key, env):
         pass
 
 def listen_for_keypress(env):
-    return
     with keyboard.Listener(on_press=lambda key: on_press(key, env)) as listener:
         listener.join()
 

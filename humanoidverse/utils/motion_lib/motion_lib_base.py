@@ -93,7 +93,18 @@ class MotionLibBase:
         self._num_unique_motions = len(self._motion_data_list)
         if self.mode == MotionlibMode.directory:
             self._motion_data_load = joblib.load(self._motion_data_load[0])  # set self._motion_data_load to a sample of the data
-        logger.info(f"Loaded {self._num_unique_motions} motions")
+        # Classify entries: single-skill vs cross-skill transitions (SG)
+        self._single_skill_indices = []
+        self._transition_indices = []
+        for i in range(self._num_unique_motions):
+            entry = self._motion_data_list[i]
+            if isinstance(entry, dict) and ('is_buffer' in entry or 'transition_distance' in entry):
+                self._transition_indices.append(i)
+            else:
+                self._single_skill_indices.append(i)
+        logger.info(f"Loaded {self._num_unique_motions} motions "
+                    f"({len(self._single_skill_indices)} single-skill, "
+                    f"{len(self._transition_indices)} transitions)")
 
     def setup_constants(self, fix_height=FixHeightMode.full_fix, multi_thread=True):
         self.fix_height = fix_height
@@ -105,6 +116,52 @@ class MotionLibBase:
         self._success_rate = torch.zeros(self._num_unique_motions).to(self._device)
         self._sampling_history = torch.zeros(self._num_unique_motions).to(self._device)
         self._sampling_prob = torch.ones(self._num_unique_motions).to(self._device) / self._num_unique_motions  # For use in sampling batches
+
+        # Build per-entry transition flag for cross-skill environment control
+        self._is_transition_entry = torch.zeros(self._num_unique_motions, dtype=torch.bool, device=self._device)
+        for idx in self._transition_indices:
+            self._is_transition_entry[idx] = True
+
+        # Cross-skill weighted sampling (disabled by default)
+        self._use_cross_skill_sampling = self.m_cfg.get('cross_skill_sampling_enable', False)
+        self._cross_skill_ratio = self.m_cfg.get('cross_skill_ratio', 0.5)
+        if self._use_cross_skill_sampling and len(self._transition_indices) > 0:
+            self._build_cross_skill_sampling_prob(self._cross_skill_ratio)
+
+    def _build_cross_skill_sampling_prob(self, ratio: float):
+        """Build non-uniform sampling probabilities for cross-skill transitions.
+
+        P(single-skill entry) = (1 - ratio) / n_single
+        P(transition entry)   = ratio / n_trans
+
+        This means 'ratio' fraction of environments will sample from
+        transition trajectories, while the rest use single-skill motions.
+        """
+        n_single = len(self._single_skill_indices)
+        n_trans = len(self._transition_indices)
+
+        if n_single == 0 or n_trans == 0:
+            logger.warning("Cannot build cross-skill sampling: need both single-skill "
+                           f"and transition entries (got {n_single} and {n_trans})")
+            return
+
+        prob = torch.zeros(self._num_unique_motions)
+        prob[self._single_skill_indices] = (1.0 - ratio) / n_single
+        prob[self._transition_indices] = ratio / n_trans
+        prob = prob / prob.sum()  # ensure sum to 1
+
+        self._sampling_prob = prob.to(self._device)
+        self._cross_skill_ratio = ratio
+
+        logger.info(f"Cross-skill sampling enabled: ratio={ratio:.2f} "
+                    f"(single_entry_prob={float(prob[self._single_skill_indices[0]]):.4f}, "
+                    f"trans_entry_prob={float(prob[self._transition_indices[0]]):.4f})")
+
+    def update_cross_skill_ratio(self, new_ratio: float):
+        """Update the cross-skill sampling ratio (e.g. for curriculum)."""
+        clamped = max(0.0, min(1.0, new_ratio))
+        if abs(clamped - self._cross_skill_ratio) > 0.01:
+            self._build_cross_skill_sampling_prob(clamped)
 
     def get_motion_actions(self, motion_ids, motion_times):
         raise RuntimeError("You Should not call it.")
@@ -252,7 +309,7 @@ class MotionLibBase:
         random_sample=True,
         start_idx=0,
         max_len=-1,
-        target_heading=None,
+        target_heading=np.array([0, 0, 0, 1.0]),
         sampling_prob=None,
     ):
         # import ipdb; ipdb.set_trace()
@@ -435,8 +492,10 @@ class MotionLibBase:
                 from scipy.spatial.transform import Rotation as sRot
 
                 start_root_rot = sRot.from_rotvec(pose_aa[0, 0])
-                # breakpoint()
-                heading_inv_rot = sRot.from_quat(calc_heading_quat_inv(torch.from_numpy(start_root_rot.as_quat()[None,]), True))  # need xyzw
+                # Use Euler Z (yaw) instead of calc_heading which fails for tilted pelvis
+                # calc_heading projects +X onto XY plane — breaks when pelvis modifier tilts X→Z
+                yaw = start_root_rot.as_euler('xyz')[2]
+                heading_inv_rot = sRot.from_euler('z', -yaw)
                 heading_delta = sRot.from_quat(target_heading) * heading_inv_rot
                 pose_aa[:, 0] = torch.tensor((heading_delta * sRot.from_rotvec(pose_aa[:, 0])).as_rotvec())
 

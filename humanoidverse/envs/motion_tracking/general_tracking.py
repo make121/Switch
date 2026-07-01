@@ -58,10 +58,24 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
             self._motion_lib.load_motions(random_sample=False)
         else:
             self.max_len = getattr(self.config.robot.motion, "motion_max_len", -1)
-            self._motion_lib.load_motions(random_sample=False, max_len=self.max_len)  # init not random sample
+            _random = self._motion_lib._use_cross_skill_sampling
+            self._motion_lib.load_motions(
+                random_sample=_random, max_len=self.max_len
+            )
 
         self.curr_motion_ids = self._motion_lib._curr_motion_ids
         self.curr_motion_keys = self._motion_lib.curr_motion_keys
+
+        # Set per-environment flag: True if this env tracks a transition trajectory
+        if hasattr(self._motion_lib, '_is_transition_entry'):
+            self.is_cross_skill_env = self._motion_lib._is_transition_entry[
+                self.curr_motion_ids
+            ].clone()
+        else:
+            self.is_cross_skill_env = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+        logger.info(f"Cross-skill envs: {self.is_cross_skill_env.sum().item()}/{self.num_envs}")
+
         ref_init_state = self.kick_motion_res()
         self._kick_motion_res_counter = -1
         self.ref_init_rpy = get_euler_xyz_in_tensor(ref_init_state["root_rot"][:1])  # [1,3]
@@ -275,6 +289,12 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         if len(env_ids) == 0:
             return
         self.motion_len[env_ids] = self._motion_lib.get_motion_length(self.motion_ids[env_ids])
+
+        # Update cross-skill flag (needed after load_motions resample)
+        if hasattr(self._motion_lib, '_is_transition_entry'):
+            self.is_cross_skill_env[env_ids] = self._motion_lib._is_transition_entry[
+                self._motion_lib._curr_motion_ids[env_ids]
+            ]
 
         if self.is_evaluating and not self.config.enforce_randomize_motion_start_eval:
             self.motion_start_times[env_ids] = torch.zeros(len(env_ids), dtype=torch.float32, device=self.device)
