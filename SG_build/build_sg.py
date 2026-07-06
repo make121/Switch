@@ -26,7 +26,7 @@ from pathlib import Path
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
-from SG_build.skill_graph import (
+from SG_build.skill_graph_V2 import (
     SkillGraphBuilder,
     build_skill_graph,
     load_motion_pkl,
