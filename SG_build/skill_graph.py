@@ -238,9 +238,11 @@ class SkillGraphBuilder:
         skill_labels: Optional[List[str]] = None,
         cross_skill_topk: int = 5,  # top-K nearest neighbours per frame
         cross_skill_threshold: float = 30.0,  # max L1 distance for an edge
-        buffer_base_threshold: float = 3.0,  # distance per buffer node
+        buffer_base_threshold: float = 1.0,  # distance per buffer node
         max_buffer_nodes: int = 30,  # cap on buffer nodes per edge
         subsample_stride: int = 3,  # stride for source-frame subsampling
+        exclude_boundary_frames: int = 10,  # exclude transitions near skill boundaries
+        max_trajectories_per_pair: int = 10,  # max trajectories per skill pair
         fps: Optional[float] = None,  # override fps (default: from data)
     ):
         self.motion_files = motion_files
@@ -250,6 +252,8 @@ class SkillGraphBuilder:
         self.buffer_base_threshold = buffer_base_threshold
         self.max_buffer_nodes = max_buffer_nodes
         self.subsample_stride = subsample_stride
+        self.exclude_boundary_frames = exclude_boundary_frames
+        self.max_trajectories_per_pair = max_trajectories_per_pair
         self.fps = fps
 
         # Internal state
@@ -386,6 +390,25 @@ class SkillGraphBuilder:
     # Step 4: Buffer nodes  (Sec III-B.3)
     # ------------------------------------------------------------------
 
+    def _is_boundary_node(self, global_id: int, graph: SkillGraph) -> bool:
+        """Check if a node falls within the boundary exclusion zone of any skill.
+
+        Boundary zones are the first N and last N frames of each skill.
+        Returns True if the node should be excluded from buffer trajectory
+        endpoints.
+        """
+        if self.exclude_boundary_frames <= 0:
+            return False
+        n = self.exclude_boundary_frames
+        offset = 0
+        for length in graph.skill_lengths:
+            local_id = global_id - offset
+            if 0 <= local_id < length:
+                # First N frames or last N frames of this skill
+                return local_id < n or local_id >= length - n
+            offset += length
+        return False
+
     def compute_buffer_count(self, distance: float) -> int:
         """N buffer nodes based on distance between endpoints."""
         n = int(distance / self.buffer_base_threshold)
@@ -476,11 +499,21 @@ class SkillGraphBuilder:
                 # Sort by weight (distance), pick best edges
                 pair_edges.sort(key=lambda e: e.weight)
 
-                # Take up to 20 best transitions per skill pair
+                # Collect up to max_trajectories_per_pair valid transitions,
+                # iterating through all edges until target is met or exhausted
                 seen_src = set()
-                for edge in pair_edges[:20]:
+                collected = 0
+                for edge in pair_edges:
+                    if collected >= self.max_trajectories_per_pair:
+                        break
                     if edge.src in seen_src:
                         continue
+
+                    # Skip transitions where src or dst falls within boundary
+                    # frames of any skill (e.g. first/last N frames of a skill)
+                    if self._is_boundary_node(edge.src, graph) or self._is_boundary_node(edge.dst, graph):
+                        continue
+
                     seen_src.add(edge.src)
 
                     t_src = edge.src - src_start
@@ -601,6 +634,7 @@ class SkillGraphBuilder:
                             f"dist{edge.weight:.1f}")
                     augmented[name] = traj_dict
                     traj_idx += 1
+                    collected += 1
 
         print(f"Buffer trajectories: {len(augmented)} created")
         return augmented
@@ -701,8 +735,10 @@ def build_skill_graph(
     output_dir: str = "./sg_output",
     cross_skill_threshold: float = 30.0,
     cross_skill_topk: int = 5,
-    buffer_base_threshold: float = 3.0,
+    buffer_base_threshold: float = 1.0,
     subsample_stride: int = 3,
+    exclude_boundary_frames: int = 10,
+    max_trajectories_per_pair: int = 10,
     **kwargs,
 ) -> Tuple[SkillGraph, Dict[str, Dict]]:
     """One-shot skill graph construction.
@@ -715,6 +751,10 @@ def build_skill_graph(
         cross_skill_topk: Number of nearest neighbors per frame
         buffer_base_threshold: L1 distance per buffer node
         subsample_stride: Stride for sampling source frames
+        exclude_boundary_frames: Exclude transitions whose src or dst
+            falls within N frames of any skill boundary (default: 10)
+        max_trajectories_per_pair: Max trajectories per skill pair
+            (default: 10). Iterates all edges until target is met.
 
     Returns:
         (graph, augmented_motions) tuple
@@ -726,6 +766,8 @@ def build_skill_graph(
         cross_skill_topk=cross_skill_topk,
         buffer_base_threshold=buffer_base_threshold,
         subsample_stride=subsample_stride,
+        exclude_boundary_frames=exclude_boundary_frames,
+        max_trajectories_per_pair=max_trajectories_per_pair,
         **kwargs,
     )
     graph, augmented = builder.build()

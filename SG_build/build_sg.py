@@ -65,8 +65,8 @@ def main():
         help="Top-K nearest neighbors per frame (default: 5)",
     )
     parser.add_argument(
-        "--buffer-base", type=float, default=3.0,
-        help="L1 distance per buffer node (default: 3.0)",
+        "--buffer-base", type=float, default=1.0,
+        help="L1 distance per buffer node (default: 1.0)",
     )
     parser.add_argument(
         "--max-buffer", type=int, default=30,
@@ -75,6 +75,15 @@ def main():
     parser.add_argument(
         "--subsample", type=int, default=3,
         help="Subsample stride for source frames (default: 3)",
+    )
+    parser.add_argument(
+        "--exclude-boundary", type=int, default=10,
+        help="Exclude transitions whose src or dst falls within N frames "
+             "of any skill boundary (default: 10)",
+    )
+    parser.add_argument(
+        "--max-trajectories", type=int, default=10,
+        help="Max trajectories to collect per skill pair (default: 10)",
     )
     parser.add_argument(
         "--fps", type=float, default=None, help="Override FPS for all motions"
@@ -130,6 +139,8 @@ def main():
         buffer_base_threshold=args.buffer_base,
         max_buffer_nodes=args.max_buffer,
         subsample_stride=args.subsample,
+        exclude_boundary_frames=args.exclude_boundary,
+        max_trajectories_per_pair=args.max_trajectories,
         fps=args.fps,
     )
 

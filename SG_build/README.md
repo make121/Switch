@@ -48,14 +48,17 @@ sg_output/
 |---|---|---|
 | `--threshold` | 30.0 | 跨技能边的最大 L1 距离 |
 | `--topk` | 5 | 每帧在目标技能中的最近邻数 |
-| `--buffer-base` | 3.0 | 每个 buffer 节点对应的 L1 距离 |
+| `--buffer-base` | 1.0 | 每个 buffer 节点对应的 L1 距离 |
 | `--max-buffer` | 30 | 单条边的最大 buffer 节点数 |
 | `--subsample` | 3 | 源帧采样步长 (1=每帧, 3=每三帧) |
+| `--exclude-boundary` | 10 | 排除起始/目标节点在技能前后 N 帧内的轨迹 |
+| `--max-trajectories` | 10 | 每对技能最多收集的轨迹数，遍历所有边直到达标 |
 
 **参数调节建议**：
 - `--threshold` 越小 → 只连接非常相似的状态 → 过渡更可靠但更少
 - `--buffer-base` 越小 → 更多 buffer 节点 → 过渡更平滑但训练数据更大
 - `--subsample 1` → 每帧都计算跨技能边 → 全面但慢
+- `--exclude-boundary 0` → 不排除边界帧，允许所有跨技能过渡
 
 ## 算法流程 (对应论文章节)
 
