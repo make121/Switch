@@ -24,6 +24,11 @@ def on_press(key, env):
         if key.char == 'n':
             env.request_next_task = True
             logger.info("Requested next task (will execute at safe point).")
+        # Skill scheduler commands (consumed by SkillSchedulerEvalCallback):
+        # 7/8/9/0 -> skill 0/1/2/3
+        if key.char in ('7', '8', '9', '0'):
+            env.requested_skill_id = {'7': 0, '8': 1, '9': 2, '0': 3}[key.char]
+            logger.info(f"Requested skill switch to skill {env.requested_skill_id}")
         # Force Control
        # Force Control
         if hasattr(key, 'char'):
@@ -142,8 +147,14 @@ def main(override_config: OmegaConf):
     eval_log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Saving eval logs to {eval_log_dir}")
-    with open(eval_log_dir / "config.yaml", "w") as file:
-        OmegaConf.save(config, file)
+    try:
+        with open(eval_log_dir / "config.yaml", "w") as file:
+            OmegaConf.save(config, file)
+    except Exception as e:
+        # OmegaConf.save can fail on merged configs (e.g. yaml.emitter
+        # EmitterError: anchor must not be empty). The eval log config is
+        # informational only -- never crash the eval over it.
+        logger.warning(f"Could not save eval config.yaml: {e}")
 
     # print(f"config.num_envs: {config.num_envs}"); breakpoint()
     ckpt_num = config.checkpoint.split('/')[-1].split('_')[-1].split('.')[0]

@@ -94,6 +94,61 @@ class FrameFeatures:
 
 
 # ---------------------------------------------------------------------------
+# Frame interpolation (shared by graph building and the deploy-time
+# reference builder)
+# ---------------------------------------------------------------------------
+
+def interpolate_frame(
+    src_motion: Dict[str, np.ndarray],
+    dst_motion: Dict[str, np.ndarray],
+    t_src: int,
+    t_dst: int,
+    alpha: float,
+) -> Dict[str, np.ndarray]:
+    """Linearly interpolate a single frame between two source frames.
+
+    alpha=0 → src frame, alpha=1 → dst frame.
+    Rotation uses SLERP (spherical linear interpolation).
+    """
+    frame = {}
+
+    # Joint positions: linear
+    if "dof" in src_motion:
+        frame["dof"] = (1 - alpha) * src_motion["dof"][t_src] + alpha * dst_motion["dof"][t_dst]
+
+    # Root translation: linear
+    frame["root_trans_offset"] = (
+        (1 - alpha) * src_motion["root_trans_offset"][t_src]
+        + alpha * dst_motion["root_trans_offset"][t_dst]
+    )
+
+    # Root rotation: SLERP
+    if "root_rot" in src_motion:
+        r_src = R.from_quat(src_motion["root_rot"][t_src][[1, 2, 3, 0]])  # xyzw→wxyz
+        r_dst = R.from_quat(dst_motion["root_rot"][t_dst][[1, 2, 3, 0]])
+        slerp = Slerp([0, 1], R.concatenate([r_src, r_dst]))
+        r_interp = slerp(alpha).as_quat()[[3, 0, 1, 2]]  # wxyz→xyzw
+        if r_interp.shape == (4,):
+            frame["root_rot"] = r_interp
+        else:
+            frame["root_rot"] = r_interp[0]
+
+    # pose_aa: linear interpolation (approximate)
+    if "pose_aa" in src_motion:
+        frame["pose_aa"] = (1 - alpha) * src_motion["pose_aa"][t_src] + alpha * dst_motion["pose_aa"][t_dst]
+
+    # smpl_joints: linear interpolation
+    if "smpl_joints" in src_motion:
+        frame["smpl_joints"] = (1 - alpha) * src_motion["smpl_joints"][t_src] + alpha * dst_motion["smpl_joints"][t_dst]
+
+    # contact_mask: use target skill's mask (paper: buffer uses target frame for reward)
+    if "contact_mask" in src_motion:
+        frame["contact_mask"] = dst_motion["contact_mask"][t_dst].copy()
+
+    return frame
+
+
+# ---------------------------------------------------------------------------
 # Distance metric  (Sec III-A.2, Eq. 2)
 # ---------------------------------------------------------------------------
 
@@ -126,6 +181,11 @@ class GraphNode:
     is_buffer: bool = False
     buffer_src: int = -1   # source global id (buffer nodes only)
     buffer_dst: int = -1   # target global id (buffer nodes only)
+    # Deployment metadata for the online skill scheduler (spec 1.1):
+    kappa: int = 0  # remaining steps to end of buffer segment; 0 for non-buffer
+    dof: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
+    dof_vel: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
+    root_trans: Optional[np.ndarray] = field(default=None, compare=False, repr=False)
 
     def __hash__(self):
         return hash(self.global_id)
@@ -163,12 +223,18 @@ class SkillGraph:
     _adj: Dict[int, List[Tuple[int, GraphEdge]]] = field(default_factory=dict)
 
     def add_node(self, skill_id: int, frame_idx: int, is_buffer: bool = False,
-                 buffer_src: int = -1, buffer_dst: int = -1) -> int:
+                 buffer_src: int = -1, buffer_dst: int = -1, kappa: int = 0,
+                 dof: Optional[np.ndarray] = None,
+                 dof_vel: Optional[np.ndarray] = None,
+                 root_trans: Optional[np.ndarray] = None) -> int:
         gid = len(self.nodes)
         self.nodes.append(GraphNode(skill_id, frame_idx, gid,
                                     is_buffer=is_buffer,
                                     buffer_src=buffer_src,
-                                    buffer_dst=buffer_dst))
+                                    buffer_dst=buffer_dst,
+                                    kappa=kappa,
+                                    dof=dof, dof_vel=dof_vel,
+                                    root_trans=root_trans))
         return gid
 
     def add_edge(self, src: int, dst: int, weight: float, is_cross: bool = False, is_buffer: bool = False):
@@ -185,6 +251,12 @@ class SkillGraph:
         offset = sum(self.skill_lengths[: skill_id + 1])
         return offset - 1
 
+    @staticmethod
+    def _feature_to_list(arr: Optional[np.ndarray]) -> list:
+        if arr is None:
+            return []
+        return np.round(np.asarray(arr, dtype=np.float64), 6).tolist()
+
     def to_dict(self) -> dict:
         buf_nodes = [n for n in self.nodes if n.is_buffer]
         return {
@@ -195,6 +267,21 @@ class SkillGraph:
             "num_buffer_edges": self.buffer_edge_count,
             "skill_names": self.skill_names,
             "skill_lengths": [int(x) for x in self.skill_lengths],
+            # Per-node state features for the online skill scheduler
+            # (spec 1.1): q = dof, q_dot = dof_vel, p_hat = root_trans.
+            "nodes": [
+                {
+                    "node_id": int(n.global_id),
+                    "skill_id": int(n.skill_id),
+                    "frame_idx": int(n.frame_idx),
+                    "is_buffer": bool(n.is_buffer),
+                    "kappa": int(n.kappa),
+                    "q": self._feature_to_list(n.dof),
+                    "q_dot": self._feature_to_list(n.dof_vel),
+                    "p_hat": self._feature_to_list(n.root_trans),
+                }
+                for n in self.nodes
+            ],
             "edges": [e.to_dict() for e in self.edges],
             "buffer_nodes": [
                 {
@@ -321,7 +408,10 @@ class SkillGraphBuilder:
             n_frames = len(feats)
             graph.skill_lengths.append(n_frames)
             for t in range(n_frames):
-                node = GraphNode(skill_id, t, gid)
+                f = feats[t]
+                node = GraphNode(skill_id, t, gid,
+                                 dof=f.dof, dof_vel=f.dof_vel,
+                                 root_trans=f.root_trans)
                 graph.nodes.append(node)
                 if t > 0:
                     # Temporal edge: weight = 1 (paper Eq. 3)
@@ -461,47 +551,9 @@ class SkillGraphBuilder:
         t_dst: int,
         alpha: float,
     ) -> Dict[str, np.ndarray]:
-        """Linearly interpolate a single frame between two source frames.
-
-        alpha=0 → src frame, alpha=1 → dst frame.
-        Rotation uses SLERP (spherical linear interpolation).
-        """
-        frame = {}
-
-        # Joint positions: linear
-        if "dof" in src_motion:
-            frame["dof"] = (1 - alpha) * src_motion["dof"][t_src] + alpha * dst_motion["dof"][t_dst]
-
-        # Root translation: linear
-        frame["root_trans_offset"] = (
-            (1 - alpha) * src_motion["root_trans_offset"][t_src]
-            + alpha * dst_motion["root_trans_offset"][t_dst]
-        )
-
-        # Root rotation: SLERP
-        if "root_rot" in src_motion:
-            r_src = R.from_quat(src_motion["root_rot"][t_src][[1, 2, 3, 0]])  # xyzw→wxyz
-            r_dst = R.from_quat(dst_motion["root_rot"][t_dst][[1, 2, 3, 0]])
-            slerp = Slerp([0, 1], R.concatenate([r_src, r_dst]))
-            r_interp = slerp(alpha).as_quat()[[3, 0, 1, 2]]  # wxyz→xyzw
-            if r_interp.shape == (4,):
-                frame["root_rot"] = r_interp
-            else:
-                frame["root_rot"] = r_interp[0]
-
-        # pose_aa: linear interpolation (approximate)
-        if "pose_aa" in src_motion:
-            frame["pose_aa"] = (1 - alpha) * src_motion["pose_aa"][t_src] + alpha * dst_motion["pose_aa"][t_dst]
-
-        # smpl_joints: linear interpolation
-        if "smpl_joints" in src_motion:
-            frame["smpl_joints"] = (1 - alpha) * src_motion["smpl_joints"][t_src] + alpha * dst_motion["smpl_joints"][t_dst]
-
-        # contact_mask: use target skill's mask (paper: buffer uses target frame for reward)
-        if "contact_mask" in src_motion:
-            frame["contact_mask"] = dst_motion["contact_mask"][t_dst].copy()
-
-        return frame
+        """Delegate to the module-level interpolate_frame (kept for backward
+        compatibility with existing callers)."""
+        return interpolate_frame(src_motion, dst_motion, t_src, t_dst, alpha)
 
     def build_buffer_trajectories(self, graph: SkillGraph) -> Dict[str, Dict]:
         """Create augmented motion trajectories with buffer nodes.
@@ -559,14 +611,36 @@ class SkillGraphBuilder:
                     t_dst = edge.dst - dst_start
                     n_buffer = self.compute_buffer_count(edge.weight)
 
+                    src_mot = self._motions[src_skill]
+                    dst_mot = self._motions[dst_skill]
+
+                    # Precompute interpolated buffer frames once; reused for
+                    # both graph node features and trajectory assembly below.
+                    # dof_vel is lerped between the endpoint velocities so the
+                    # units match the finite-difference velocities of regular
+                    # nodes.
+                    src_vel = self._features[src_skill][t_src].dof_vel
+                    dst_vel = self._features[dst_skill][t_dst].dof_vel
+                    buf_frames = []
+                    for k in range(1, n_buffer + 1):
+                        alpha = k / (n_buffer + 1)
+                        buf = self.interpolate_frame(src_mot, dst_mot, t_src, t_dst, alpha)
+                        buf["dof_vel"] = (1 - alpha) * src_vel + alpha * dst_vel
+                        buf_frames.append(buf)
+
                     # ---- Add buffer nodes + edges to the graph ----
                     if n_buffer > 0:
                         prev_gid = edge.src
                         buf_gids = []
                         for k in range(1, n_buffer + 1):
+                            buf = buf_frames[k - 1]
                             buf_gid = graph.add_node(
                                 skill_id=-1, frame_idx=-1, is_buffer=True,
-                                buffer_src=edge.src, buffer_dst=edge.dst)
+                                buffer_src=edge.src, buffer_dst=edge.dst,
+                                kappa=n_buffer - k + 1,
+                                dof=buf.get("dof"),
+                                dof_vel=buf.get("dof_vel"),
+                                root_trans=buf.get("root_trans_offset"))
                             buf_gids.append(buf_gid)
                             # Edge from previous node to this buffer
                             graph.add_edge(prev_gid, buf_gid,
@@ -591,9 +665,6 @@ class SkillGraphBuilder:
                     traj_contact = []
                     traj_is_buffer = []  # metadata: which frames are buffer nodes
                     traj_source = []  # metadata: which skill each frame is from
-
-                    src_mot = self._motions[src_skill]
-                    dst_mot = self._motions[dst_skill]
 
                     # Source frames: take ~1 second before transition
                     n_src = min(30, t_src + 1)
@@ -621,8 +692,7 @@ class SkillGraphBuilder:
 
                     # Buffer nodes
                     for k in range(1, n_buffer + 1):
-                        alpha = k / (n_buffer + 1)
-                        buf = self.interpolate_frame(src_mot, dst_mot, t_src, t_dst, alpha)
+                        buf = buf_frames[k - 1]
                         for key in ["dof", "root_trans_offset", "root_rot", "pose_aa", "smpl_joints", "contact_mask"]:
                             if key in buf and key[:-1] + "_" not in str(type(buf[key])):
                                 pass

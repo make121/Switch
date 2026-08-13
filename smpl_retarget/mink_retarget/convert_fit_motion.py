@@ -125,7 +125,7 @@ def main(
     # mkdir
     append_name = robot_type
     if force_retarget:
-        append_name += "_retargeted_npy"
+        append_name += "_retarget"
     folder_names = [
         f.path.split("/")[-1] for f in os.scandir(amass_root_dir) if f.is_dir()
     ]
@@ -155,8 +155,8 @@ def main(
                 if not (
                     output_dir
                     / f.relative_to(data_dir).parent
-                    / f.name.replace(".npz", ".npy")
-                    .replace(".pkl", ".npy")
+                    / f.name.replace(".npz", "_retarget.npy")
+                    .replace(".pkl", "_retarget.npy")
                     .replace("-", "_")
                     .replace(" ", "_")
                     .replace("(", "_")
@@ -197,8 +197,8 @@ def main(
                 outpath = (
                     output_dir
                     / relative_path_dir
-                    / filename.name.replace(".npz", ".npy")
-                    .replace(".pkl", ".npy")
+                    / filename.name.replace(".npz", "_retarget.npy")
+                    .replace(".pkl", "_retarget.npy")
                     .replace("-", "_")
                     .replace(" ", "_")
                     .replace("(", "_")
@@ -415,7 +415,7 @@ def main(
                     output_folder_path = "./retargeted_motion_data/mink"
 
                     os.makedirs(output_folder_path, exist_ok=True)
-                    path = os.path.join(output_folder_path, f"{filename.stem}.pkl")
+                    path = os.path.join(output_folder_path, f"{filename.stem}_retarget.pkl")
 
                     print(path)
 

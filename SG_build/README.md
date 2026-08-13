@@ -38,8 +38,17 @@ python SG_build/build_sg.py \
 ```
 sg_output/
 ├── skill_graph.json        # 图谱结构 (节点、边、权重)
+│                           #   nodes[] 含逐节点部署特征: skill_id, frame_idx,
+│                           #   is_buffer, kappa, q(dof), q_dot(dof_vel), p_hat(root_trans)
 ├── augmented_motions.pkl   # 过渡轨迹 (含 buffer 节点)
-└── merged_training.pkl     # 原始动作 + 增强过渡 (PBHC 训练就绪)
+├── merged_training.pkl     # 原始动作 + 增强过渡 (PBHC 训练就绪)
+└── scheduler_config.yaml   # 由 calibrate.py 生成 (σ 统计量 + A/B 阈值候选)
+```
+
+离线标定（在线调度器第一步，见 `switch_scheduler_spec.md` 6.1）：
+
+```bash
+python humanoidverse/deploy/skill_scheduler/calibrate.py sg_output/skill_graph.json
 ```
 
 ## 核心参数
