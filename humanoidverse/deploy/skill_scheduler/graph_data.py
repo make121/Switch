@@ -167,3 +167,23 @@ class SkillGraphData:
             if et == EDGE_SAME_SKILL:
                 return v
         return None
+
+    def add_runtime_buffer_node(self, src: int, dst: int, kappa: int,
+                                state: NodeState) -> int:
+        """Append a runtime buffer node (NN planner, spec 2.2): an on-the-fly
+        interpolated node between src and dst, not present at graph build
+        time. Marked is_buffer with buffer_src/dst so ReferenceBuilder chain
+        detection and kappa passthrough work exactly like build-time buffers.
+        NOT wired into the adjacency lists (NN paths reference it directly).
+        """
+        gid = len(self.nodes)
+        self.nodes.append(state)
+        self.skill_ids = np.append(self.skill_ids, -1)
+        self.frame_idxs = np.append(self.frame_idxs, -1)
+        self.is_buffer = np.append(self.is_buffer, True)
+        self.kappas = np.append(self.kappas, kappa)
+        self.buffer_src = np.append(self.buffer_src, src)
+        self.buffer_dst = np.append(self.buffer_dst, dst)
+        self.adj.append([])
+        self.rev_adj.append([])
+        return gid

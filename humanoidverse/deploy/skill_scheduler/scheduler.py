@@ -18,7 +18,7 @@ from typing import List, Optional, Union
 
 from .distance import NodeState
 from .graph_data import SkillGraphData
-from .planners import GraphSearchPlanner
+from .planners import GraphSearchPlanner, NNPlanner
 
 
 @dataclass
@@ -34,10 +34,10 @@ class SkillGraphScheduler:
                  A: float, B: float, lambda_cost: float,
                  tau: float, top_k: int, grace_s: float = 0.0,
                  candidate_pool: str = "all",
-                 enable_safety_replan: bool = False):
-        if planner_type != "graph_search":
-            raise NotImplementedError(
-                f"planner_type={planner_type!r} not implemented yet (step 3)")
+                 enable_safety_replan: bool = False,
+                 nn_buffer_base: float = 1.0, nn_max_buffer: int = 30):
+        if planner_type not in ("graph_search", "nn"):
+            raise ValueError(f"bad planner_type: {planner_type!r}")
         self.graph = graph
         self.planner_type = planner_type
         self.A = A
@@ -65,6 +65,9 @@ class SkillGraphScheduler:
         self.grace_s = grace_s
         self._grace_until = 0.0
         self.planner = GraphSearchPlanner(graph)
+        self.nn_planner = NNPlanner(graph, buffer_base=nn_buffer_base,
+                                    max_buffer=nn_max_buffer) \
+            if planner_type == "nn" else None
 
         self.current_cmd: Optional[int] = None
         self.T_cmd: List[int] = []
@@ -132,6 +135,9 @@ class SkillGraphScheduler:
         cross edges leave them with no route to T), fall back to the best
         REACHABLE node overall; V already encodes reachability, so this is
         the principled graph-search entry selection."""
+        if self.planner_type == "nn":
+            path = self.nn_planner.plan_nn(x, candidates, T_cmd, self.B)
+            return self._extend_to_skill_end(path) if path else None
         V, next_hop = self.planner.build_value_function(T_cmd)
         T_set = set(T_cmd)
         ranked = sorted(
@@ -240,13 +246,18 @@ class SkillGraphScheduler:
         path = None
         if status == "attach":
             # Walk from the attached entry THROUGH the graph (cross-skill /
-            # buffer edges included) into T_cmd via next_hop.
-            V, next_hop = self.planner.build_value_function(self.T_cmd)
-            path = self.planner.reconstruct_path_gs(
-                candidates[0], next_hop, set(self.T_cmd))
-            if path is not None:
-                path = self._extend_to_skill_end(path)
+            # buffer edges included) into T_cmd.
+            if self.planner_type == "nn":
+                path = self.nn_planner.short_hop_path(
+                    candidates[0], self.T_cmd, self.B)
+                path = self._extend_to_skill_end(path) if path else None
             else:
+                V, next_hop = self.planner.build_value_function(self.T_cmd)
+                path = self.planner.reconstruct_path_gs(
+                    candidates[0], next_hop, set(self.T_cmd))
+                if path is not None:
+                    path = self._extend_to_skill_end(path)
+            if path is None:
                 # Attached entry cannot reach T (e.g. sits past the target
                 # region on forward-only temporal edges): scored search.
                 ranked = sorted(self.last_sims.items(), key=lambda kv: kv[1])

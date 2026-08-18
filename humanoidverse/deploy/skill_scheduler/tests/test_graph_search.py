@@ -351,6 +351,58 @@ def test_cmd_change_estop_fallback():
     print("PASS test_cmd_change_estop_fallback")
 
 
+def test_nn_planner_direct_hop():
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="nn",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
+    gd = sched.step(x, user_cmd="skill_B", t=0.0)
+    assert gd is not None
+    # entry node 0 (sim 0), nearest T node = 5, distance 0 -> direct hop,
+    # then temporal walk to the end of skill B
+    assert sched.current_path == [0, 5, 6, 7, 8, 9], sched.current_path
+    print("PASS test_nn_planner_direct_hop")
+
+
+def test_nn_planner_runtime_buffers():
+    g = load_toy()
+    for i in range(5, 10):  # skill B frames now differ by 0.1 per dof
+        g.nodes[i].q = g.nodes[i].q + 0.1
+    sched = SkillGraphScheduler(g, planner_type="nn",
+                                A=0.5, B=5.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
+    n0 = g.num_nodes
+    gd = sched.step(x, user_cmd="skill_B", t=0.0)
+    assert gd is not None
+    # entry 0 -> t_star 5, d = 23*0.1 = 2.3 -> n_buf = 2 runtime buffers
+    path = sched.current_path
+    assert g.num_nodes == n0 + 2
+    assert path[0] == 0 and path[-1] == 9
+    buf_ids = path[1:3]
+    assert all(g.is_buffer[b] for b in buf_ids)
+    assert [int(g.kappas[b]) for b in buf_ids] == [2, 1]
+    assert np.allclose(g.nodes[buf_ids[0]].q, 0.1 / 3)
+    assert np.allclose(g.nodes[buf_ids[1]].q, 0.2 / 3)
+    # buffer chain caches and reuses nodes on a second identical plan
+    path2 = sched.nn_planner.short_hop_path(0, sched.T_cmd, 5.0)
+    assert path2[1:3] == buf_ids and g.num_nodes == n0 + 2
+    print("PASS test_nn_planner_runtime_buffers")
+
+
+def test_nn_planner_unsafe_jump():
+    g = load_toy()
+    for i in range(5, 10):
+        g.nodes[i].q = g.nodes[i].q + 10.0  # way beyond B
+    sched = SkillGraphScheduler(g, planner_type="nn",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    nn = sched.nn_planner
+    assert nn.short_hop_path(0, [5, 6, 7, 8, 9], 2.0) is None
+    print("PASS test_nn_planner_unsafe_jump")
+
+
 def main():
     test_deploy_edge_weight()
     test_value_function_hand_computed()
@@ -358,6 +410,9 @@ def main():
     test_scheduler_step_flow()
     test_safety_replan_disabled_by_default()
     test_cmd_change_estop_fallback()
+    test_nn_planner_direct_hop()
+    test_nn_planner_runtime_buffers()
+    test_nn_planner_unsafe_jump()
     test_real_graph_paths()
     test_kappa_passthrough()
     test_extend_to_skill_end()

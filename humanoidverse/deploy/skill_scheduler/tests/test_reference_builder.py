@@ -33,7 +33,9 @@ def setup():
         cfg = yaml.safe_load(f)
     graph = SkillGraphData.from_json(
         str(GRAPH), sigma_q=cfg["sigma_q"], sigma_qdot=cfg["sigma_qdot"],
-        sigma_p=cfg["sigma_p"], lambda_sw=5.0)
+        sigma_p=cfg["sigma_p"], lambda_sw=5.0,
+        w_q=cfg.get("w_q", 1.0), w_qdot=cfg.get("w_qdot", 1.0),
+        w_p=cfg.get("w_p", 1.0))
     rb = ReferenceBuilder.from_pkl_files(graph, [str(p) for p in PKLS])
     return graph, rb
 
@@ -139,11 +141,38 @@ def test_xy_continuity_across_skills():
           f"(max xy step after fix: {steps.max():.3f}m)")
 
 
+def test_nn_path_builds_trajectory():
+    """NN planner paths (with runtime buffer nodes) must assemble into
+    trajectories through the same ReferenceBuilder machinery."""
+    from humanoidverse.deploy.skill_scheduler.scheduler import \
+        SkillGraphScheduler
+    graph, rb = setup()
+    n0 = graph.num_nodes
+    sched = SkillGraphScheduler(graph, planner_type="nn",
+                                A=1.889, B=10.0, lambda_cost=1.0,
+                                tau=0.2, top_k=5)
+    x = graph.nodes[100]  # skill 0 frame 100
+    sched.set_command(1)
+    assert sched.step(x, user_cmd=None, t=0.0) is not None
+    path = sched.current_path
+    traj = rb.build_trajectory(path)
+    assert traj["dof"].shape[0] == len(path)
+    # if runtime buffers were created, kappas must decrease along them
+    buf_kappas = [int(graph.kappas[n]) for n in path if graph.is_buffer[n]]
+    assert buf_kappas == sorted(buf_kappas, reverse=True)
+    steps = np.linalg.norm(
+        np.diff(traj["root_trans_offset"][:, :2], axis=0), axis=1)
+    assert steps.max() <= 0.3 + 1e-9
+    print(f"PASS test_nn_path_builds_trajectory "
+          f"(path {len(path)} nodes, {graph.num_nodes - n0} runtime buffers)")
+
+
 def main():
     test_original_path()
     test_buffer_chain()
     test_contact_mask_present()
     test_xy_continuity_across_skills()
+    test_nn_path_builds_trajectory()
     print("\nALL TESTS PASSED")
 
 
