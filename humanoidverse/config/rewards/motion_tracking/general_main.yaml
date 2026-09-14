@@ -16,7 +16,7 @@ rewards:
       key_body_velocity: 2.0
       key_body_ang_velocity: 2.0
       
-      penalty_action_rate: -0.1
+      penalty_action_rate: -0.5
       penalty_dof_vel: -0.0001
       penalty_dof_acc: -3e-7
       foot_slip_penalty: -0.1

@@ -122,20 +122,24 @@ def interpolate_frame(
         + alpha * dst_motion["root_trans_offset"][t_dst]
     )
 
-    # Root rotation: SLERP
+    # Root rotation: SLERP. PBHC stores quaternions in SciPy's native
+    # ``xyzw`` order, so no component permutation is needed here.
+    root_rotvec = None
     if "root_rot" in src_motion:
-        r_src = R.from_quat(src_motion["root_rot"][t_src][[1, 2, 3, 0]])  # xyzw→wxyz
-        r_dst = R.from_quat(dst_motion["root_rot"][t_dst][[1, 2, 3, 0]])
+        r_src = R.from_quat(src_motion["root_rot"][t_src])
+        r_dst = R.from_quat(dst_motion["root_rot"][t_dst])
         slerp = Slerp([0, 1], R.concatenate([r_src, r_dst]))
-        r_interp = slerp(alpha).as_quat()[[3, 0, 1, 2]]  # wxyz→xyzw
-        if r_interp.shape == (4,):
-            frame["root_rot"] = r_interp
-        else:
-            frame["root_rot"] = r_interp[0]
+        r_interp = slerp(float(alpha))
+        frame["root_rot"] = r_interp.as_quat()
+        root_rotvec = r_interp.as_rotvec()
 
-    # pose_aa: linear interpolation (approximate)
+    # pose_aa: linear interpolation for articulated joints. The root entry
+    # must come from the same SLERP as root_rot; independently lerping its
+    # axis-angle representation can describe a different orientation.
     if "pose_aa" in src_motion:
         frame["pose_aa"] = (1 - alpha) * src_motion["pose_aa"][t_src] + alpha * dst_motion["pose_aa"][t_dst]
+        if root_rotvec is not None:
+            frame["pose_aa"][0] = root_rotvec
 
     # smpl_joints: linear interpolation
     if "smpl_joints" in src_motion:
@@ -146,6 +150,78 @@ def interpolate_frame(
         frame["contact_mask"] = dst_motion["contact_mask"][t_dst].copy()
 
     return frame
+
+
+def align_motion_to_pose(
+    motion: Dict[str, np.ndarray],
+    frame_idx: int,
+    target_xy: np.ndarray,
+    target_yaw: float,
+) -> Dict[str, np.ndarray]:
+    """Rigidly anchor one motion frame to a target planar pose.
+
+    The returned motion is a shallow copy with transformed spatial arrays;
+    the input is never mutated. Root height and all relative motion are
+    preserved. This is the shared SE(2) operation for cross-skill stitching.
+    """
+    if "root_trans_offset" not in motion or "root_rot" not in motion:
+        raise KeyError("SE(2) alignment requires root_trans_offset and root_rot")
+
+    root_trans = np.asarray(motion["root_trans_offset"])
+    root_rot_array = np.asarray(motion["root_rot"])
+    root_rot = R.from_quat(root_rot_array)
+    source_yaw = float(root_rot[frame_idx].as_euler("xyz")[2])
+    yaw_delta = float(target_yaw) - source_yaw
+    rotation = R.from_euler("z", yaw_delta)
+
+    pivot_xy = root_trans[frame_idx, :2].copy()
+    target_xy = np.asarray(target_xy, dtype=root_trans.dtype).reshape(2)
+    out = dict(motion)
+
+    aligned_root = root_trans.copy()
+    relative_xy = aligned_root[:, :2] - pivot_xy
+    aligned_root[:, :2] = rotation.apply(
+        np.column_stack([relative_xy, np.zeros(len(relative_xy))])
+    )[:, :2] + target_xy
+    out["root_trans_offset"] = aligned_root
+
+    aligned_rot = rotation * root_rot
+    out["root_rot"] = aligned_rot.as_quat().astype(
+        root_rot_array.dtype, copy=False)
+
+    if "pose_aa" in motion:
+        pose_aa = np.asarray(motion["pose_aa"]).copy()
+        pose_aa[:, 0, :] = aligned_rot.as_rotvec()
+        out["pose_aa"] = pose_aa
+
+    if "smpl_joints" in motion:
+        joints = np.asarray(motion["smpl_joints"]).copy()
+        shape = joints.shape
+        relative = joints.reshape(-1, 3).copy()
+        relative[:, 0] -= pivot_xy[0]
+        relative[:, 1] -= pivot_xy[1]
+        transformed = rotation.apply(relative)
+        transformed[:, 0] += target_xy[0]
+        transformed[:, 1] += target_xy[1]
+        out["smpl_joints"] = transformed.reshape(shape).astype(
+            joints.dtype, copy=False)
+
+    return out
+
+
+def align_target_motion_to_source(
+    src_motion: Dict[str, np.ndarray],
+    dst_motion: Dict[str, np.ndarray],
+    t_src: int,
+    t_dst: int,
+) -> Dict[str, np.ndarray]:
+    """Anchor ``dst_motion[t_dst]`` to the source frame's XY and yaw."""
+    src_root = np.asarray(src_motion["root_trans_offset"])[t_src]
+    src_yaw = float(R.from_quat(
+        np.asarray(src_motion["root_rot"])[t_src]
+    ).as_euler("xyz")[2])
+    return align_motion_to_pose(
+        dst_motion, t_dst, target_xy=src_root[:2], target_yaw=src_yaw)
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +406,9 @@ class SkillGraphBuilder:
         subsample_stride: int = 3,  # stride for source-frame subsampling
         exclude_boundary_frames: int = 10,  # exclude transitions near skill boundaries
         max_trajectories_per_pair: int = 10,  # max trajectories per skill pair
+        transition_selection: str = "distance",  # distance (legacy) or phase
+        phase_bins: int = 16,  # source-skill temporal bins in phase mode
+        edges_per_phase_bin: int = 1,  # representative macros per bin/pair
         fps: Optional[float] = None,  # override fps (default: from data)
     ):
         self.motion_files = motion_files
@@ -341,6 +420,16 @@ class SkillGraphBuilder:
         self.subsample_stride = subsample_stride
         self.exclude_boundary_frames = exclude_boundary_frames
         self.max_trajectories_per_pair = max_trajectories_per_pair
+        if transition_selection not in {"distance", "phase"}:
+            raise ValueError(
+                "transition_selection must be 'distance' or 'phase', got "
+                f"{transition_selection!r}"
+            )
+        if phase_bins <= 0 or edges_per_phase_bin <= 0:
+            raise ValueError("phase_bins and edges_per_phase_bin must be positive")
+        self.transition_selection = transition_selection
+        self.phase_bins = phase_bins
+        self.edges_per_phase_bin = edges_per_phase_bin
         self.fps = fps
 
         # Internal state
@@ -372,7 +461,9 @@ class SkillGraphBuilder:
                 if "root_rot" in motion and "root_trans_offset" in motion:
                     rto = motion["root_trans_offset"].copy()
                     rr = motion["root_rot"].copy()
-                    r = R.from_quat(rr[:, [1, 2, 3, 0]])  # xyzw→wxyz
+                    # PBHC root_rot is xyzw, which is also SciPy's native
+                    # quaternion order.
+                    r = R.from_quat(rr)
                     yaws = r.as_euler('xyz')[:, 2]
 
                     # Circular mean: atan2(mean(sin), mean(cos))
@@ -381,15 +472,34 @@ class SkillGraphBuilder:
 
                     # Apply to root_rot (all frames aligned to yaw≈0)
                     r_aligned = yaw_correction * r
-                    motion["root_rot"] = r_aligned.as_quat()[:, [3, 0, 1, 2]]  # wxyz→xyzw
+                    motion["root_rot"] = r_aligned.as_quat()
+
+                    # Keep the FK representation used by the visualizer and
+                    # training motion library consistent with root_rot.
+                    if "pose_aa" in motion:
+                        pose_aa = motion["pose_aa"].copy()
+                        pose_aa[:, 0, :] = r_aligned.as_rotvec()
+                        motion["pose_aa"] = pose_aa
 
                     # Apply to root_trans x-y (rotate, then center)
                     rot_xy_3d = yaw_correction.apply(
                         np.column_stack([rto[:, :2], np.zeros(len(rto))])
                     )
-                    rto[:, 0] = rot_xy_3d[:, 0] - rot_xy_3d[:, 0].mean()
-                    rto[:, 1] = rot_xy_3d[:, 1] - rot_xy_3d[:, 1].mean()
+                    center_x = rot_xy_3d[:, 0].mean()
+                    center_y = rot_xy_3d[:, 1].mean()
+                    rto[:, 0] = rot_xy_3d[:, 0] - center_x
+                    rto[:, 1] = rot_xy_3d[:, 1] - center_y
                     motion["root_trans_offset"] = rto
+
+                    # smpl_joints, when present, are global positions and
+                    # need the same rigid transform as the root trajectory.
+                    if "smpl_joints" in motion:
+                        joints = motion["smpl_joints"].copy()
+                        shape = joints.shape
+                        joints = yaw_correction.apply(joints.reshape(-1, 3)).reshape(shape)
+                        joints[..., 0] -= center_x
+                        joints[..., 1] -= center_y
+                        motion["smpl_joints"] = joints
                 self._motions.append(motion)
                 feats = FrameFeatures.from_motion(motion)
                 self._features.append(feats)
@@ -543,6 +653,87 @@ class SkillGraphBuilder:
         n = int(distance / self.buffer_base_threshold)
         return min(max(0, n), self.max_buffer_nodes)
 
+    def _select_pair_edges(
+        self,
+        pair_edges: List[GraphEdge],
+        src_start: int,
+        src_length: int,
+    ) -> List[GraphEdge]:
+        """Select cross-skill macros that will exist in both train and deploy.
+
+        ``distance`` preserves the legacy behaviour (globally easiest unique
+        source states). ``phase`` partitions the source skill in time, places
+        uniform temporal anchors in every bin, and selects the valid source
+        nearest each anchor. For a source with multiple target candidates only
+        its nearest target is eligible. This trades redundant nearest-neighbor
+        edges for temporal coverage while retaining the paper's top-1 rule.
+        """
+        pair_edges = sorted(pair_edges, key=lambda e: e.weight)
+        if self.transition_selection == "distance":
+            selected = []
+            seen_src = set()
+            for edge in pair_edges:
+                if edge.src in seen_src:
+                    continue
+                selected.append(edge)
+                seen_src.add(edge.src)
+                if len(selected) >= self.max_trajectories_per_pair:
+                    break
+            return selected
+
+        # Collapse top-k candidate generation to the paper's top-1 target per
+        # sampled source before selecting temporally representative sources.
+        best_by_src: Dict[int, GraphEdge] = {}
+        for edge in pair_edges:
+            best_by_src.setdefault(edge.src, edge)
+
+        by_bin: Dict[int, List[GraphEdge]] = defaultdict(list)
+        for edge in best_by_src.values():
+            local_src = edge.src - src_start
+            phase_bin = min(
+                self.phase_bins - 1,
+                local_src * self.phase_bins // src_length,
+            )
+            by_bin[phase_bin].append(edge)
+
+        selected = []
+        for phase_bin in range(self.phase_bins):
+            available = by_bin.get(phase_bin, [])
+            if not available:
+                continue
+            bin_start = src_length * phase_bin / self.phase_bins
+            bin_end = src_length * (phase_bin + 1) / self.phase_bins
+            chosen_src = set()
+            for rank in range(self.edges_per_phase_bin):
+                anchor = bin_start + (
+                    (rank + 1) * (bin_end - bin_start)
+                    / self.edges_per_phase_bin
+                )
+                candidates = [e for e in available if e.src not in chosen_src]
+                if not candidates:
+                    break
+                edge = min(
+                    candidates,
+                    key=lambda e: (abs((e.src - src_start) - anchor), e.weight),
+                )
+                selected.append(edge)
+                chosen_src.add(edge.src)
+        return selected
+
+    @staticmethod
+    def _retain_selected_cross_edges(
+        graph: SkillGraph, selected: List[GraphEdge]
+    ) -> None:
+        """Make the searchable cross-skill graph equal the trained edge set."""
+        selected_ids = {id(edge) for edge in selected}
+        graph.edges = [
+            edge for edge in graph.edges
+            if not edge.is_cross_skill or id(edge) in selected_ids
+        ]
+        graph._adj.clear()
+        for edge in graph.edges:
+            graph._adj.setdefault(edge.src, []).append((edge.dst, edge))
+
     def interpolate_frame(
         self,
         src_motion: Dict[str, np.ndarray],
@@ -566,6 +757,36 @@ class SkillGraphBuilder:
         """
         augmented = {}
         traj_idx = 0
+        selected_by_pair = {}
+
+        # Select first, then prune. This guarantees that deployment cannot
+        # search an untrained raw cross-skill edge.
+        for src_skill in range(len(self._features)):
+            for dst_skill in range(len(self._features)):
+                if src_skill == dst_skill:
+                    continue
+                src_start = sum(graph.skill_lengths[:src_skill])
+                dst_start = sum(graph.skill_lengths[:dst_skill])
+                pair_edges = [
+                    e for e in graph.edges
+                    if e.is_cross_skill
+                    and src_start <= e.src < src_start + graph.skill_lengths[src_skill]
+                    and dst_start <= e.dst < dst_start + graph.skill_lengths[dst_skill]
+                ]
+                selected_by_pair[(src_skill, dst_skill)] = self._select_pair_edges(
+                    pair_edges, src_start, graph.skill_lengths[src_skill]
+                )
+
+        all_selected = [
+            edge for edges in selected_by_pair.values() for edge in edges
+        ]
+        candidate_count = sum(e.is_cross_skill for e in graph.edges)
+        self._retain_selected_cross_edges(graph, all_selected)
+        print(
+            f"Cross-skill edge selection: {len(all_selected)}/{candidate_count} kept "
+            f"(mode={self.transition_selection}, phase_bins={self.phase_bins}, "
+            f"edges_per_bin={self.edges_per_phase_bin})"
+        )
 
         # Group cross-skill edges by (src_skill, dst_skill) pairs
         for src_skill in range(len(self._features)):
@@ -576,43 +797,27 @@ class SkillGraphBuilder:
                 src_start = sum(graph.skill_lengths[:src_skill])
                 dst_start = sum(graph.skill_lengths[:dst_skill])
 
-                # Collect cross-skill edges for this pair
-                pair_edges = [
-                    e for e in graph.edges
-                    if e.is_cross_skill
-                    and src_start <= e.src < src_start + graph.skill_lengths[src_skill]
-                    and dst_start <= e.dst < dst_start + graph.skill_lengths[dst_skill]
-                ]
+                pair_edges = selected_by_pair[(src_skill, dst_skill)]
 
                 if not pair_edges:
                     continue
 
-                # Sort by weight (distance), pick best edges
-                pair_edges.sort(key=lambda e: e.weight)
-
-                # Collect up to max_trajectories_per_pair valid transitions,
-                # iterating through all edges until target is met or exhausted
-                seen_src = set()
-                collected = 0
                 for edge in pair_edges:
-                    if collected >= self.max_trajectories_per_pair:
-                        break
-                    if edge.src in seen_src:
-                        continue
-
                     # Skip transitions where src or dst falls within boundary
                     # frames of any skill (e.g. first/last N frames of a skill)
                     if self._is_boundary_node(edge.src, graph) or self._is_boundary_node(edge.dst, graph):
                         continue
-
-                    seen_src.add(edge.src)
 
                     t_src = edge.src - src_start
                     t_dst = edge.dst - dst_start
                     n_buffer = self.compute_buffer_count(edge.weight)
 
                     src_mot = self._motions[src_skill]
-                    dst_mot = self._motions[dst_skill]
+                    # Skills are captured in independent world frames. Anchor
+                    # this target entry to the exact macro source before
+                    # creating Buffer nodes or appending target context.
+                    dst_mot = align_target_motion_to_source(
+                        src_mot, self._motions[dst_skill], t_src, t_dst)
 
                     # Precompute interpolated buffer frames once; reused for
                     # both graph node features and trajectory assembly below.
@@ -664,6 +869,7 @@ class SkillGraphBuilder:
                     traj_smpl = []
                     traj_contact = []
                     traj_is_buffer = []  # metadata: which frames are buffer nodes
+                    traj_kappa = []  # metadata: remaining buffer steps; 0 outside buffer
                     traj_source = []  # metadata: which skill each frame is from
 
                     # Source frames: take ~1 second before transition
@@ -685,6 +891,7 @@ class SkillGraphBuilder:
                             traj_contact.append(mot["contact_mask"][slc])
                         n = (slc.stop - slc.start) if isinstance(slc, slice) else mot["dof"][slc].shape[0]
                         traj_is_buffer.extend([is_buf] * n)
+                        traj_kappa.extend([0] * n)
                         traj_source.extend([source_skill] * n)
 
                     # Source segment
@@ -709,6 +916,7 @@ class SkillGraphBuilder:
                         if "contact_mask" in buf:
                             traj_contact.append(buf["contact_mask"][np.newaxis, :])
                         traj_is_buffer.append(True)
+                        traj_kappa.append(n_buffer - k + 1)
                         traj_source.append(-1)  # -1 = buffer
 
                     # Target segment: take ~2 seconds after transition point
@@ -732,6 +940,7 @@ class SkillGraphBuilder:
                         traj_dict["contact_mask"] = np.concatenate(traj_contact, axis=0)
                     traj_dict["fps"] = src_mot.get("fps", 30)
                     traj_dict["is_buffer"] = np.array(traj_is_buffer, dtype=bool)
+                    traj_dict["kappa"] = np.array(traj_kappa, dtype=np.int32)
                     traj_dict["source_skill"] = np.array(traj_source, dtype=np.int32)
                     traj_dict["src_skill"] = src_skill
                     traj_dict["dst_skill"] = dst_skill
@@ -743,7 +952,6 @@ class SkillGraphBuilder:
                             f"dist{edge.weight:.1f}")
                     augmented[name] = traj_dict
                     traj_idx += 1
-                    collected += 1
 
         print(f"Buffer trajectories: {len(augmented)} created")
         return augmented

@@ -23,6 +23,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from humanoidverse.utils.motion_lib.torch_humanoid_batch import Humanoid_Batch
+from humanoidverse.utils.motion_lib.buffer_metadata import buffer_target_indices
 
 
 def add_visual_capsule(scene, point1, point2, radius, rgba):
@@ -117,10 +118,19 @@ def main(cfg : DictConfig) -> None:
     vis_tau_key = 'tau' if 'vis_tau_key' not in cfg else cfg.vis_tau_key
     vis_tau = vis_tau_key in curr_motion if 'vis_tau' not in cfg else cfg.vis_tau
     vis_contact = 'contact_mask' in curr_motion if 'vis_contact' not in cfg else cfg.vis_contact
+    buffer_view = str(cfg.buffer_view) if 'buffer_view' in cfg else 'stored'
+    if buffer_view not in {'stored', 'guidance', 'dual'}:
+        raise ValueError(
+            f"buffer_view must be stored, guidance, or dual; got {buffer_view!r}")
+    is_buffer = np.asarray(
+        curr_motion.get('is_buffer', np.zeros(len(curr_motion['dof']))),
+        dtype=bool)
+    guidance_indices = buffer_target_indices(is_buffer)
     
     if vis_smpl: assert 'smpl_joints' in curr_motion
     if vis_tau: assert vis_tau_key in curr_motion and not vis_contact
     if vis_contact: assert 'contact_mask' in curr_motion and not vis_tau
+    print("Buffer view: ", buffer_view)
 
     if not vis_smpl:
         cfg_robot = OmegaConf.load("description/robots/g1/phc_g1_23dof.yaml")
@@ -158,13 +168,16 @@ def main(cfg : DictConfig) -> None:
             if time_step >= curr_motion['dof'].shape[0]*dt:
                 time_step -= curr_motion['dof'].shape[0]*dt
             curr_time = round(time_step/dt) % curr_motion['dof'].shape[0]
+            guidance_time = int(guidance_indices[curr_time])
+            model_time = guidance_time if buffer_view == 'guidance' else curr_time
+            marker_time = guidance_time if buffer_view in {'guidance', 'dual'} else curr_time
             
             if hang:
                 mj_data.qpos[:3] = np.array([0,0,0.8])
             else:
-                mj_data.qpos[:3] = curr_motion['root_trans_offset'][curr_time]
-            mj_data.qpos[3:7] = curr_motion['root_rot'][curr_time][[3, 0, 1, 2]] #xyzw 2 wxyz
-            mj_data.qpos[7:] = curr_motion['dof'][curr_time]
+                mj_data.qpos[:3] = curr_motion['root_trans_offset'][model_time]
+            mj_data.qpos[3:7] = curr_motion['root_rot'][model_time][[3, 0, 1, 2]] #xyzw 2 wxyz
+            mj_data.qpos[7:] = curr_motion['dof'][model_time]
             
             
             mujoco.mj_forward(mj_model, mj_data)
@@ -174,12 +187,19 @@ def main(cfg : DictConfig) -> None:
                 
             if vis_smpl:
                 joint_gt = motion_data[curr_motion_key]['smpl_joints']
-                if not np.all(joint_gt[curr_time] == 0):
+                if not np.all(joint_gt[marker_time] == 0):
                     for i in range(joint_gt.shape[1]):
-                        viewer.user_scn.geoms[i].pos = joint_gt[curr_time, i]
+                        viewer.user_scn.geoms[i].pos = joint_gt[marker_time, i]
             else:
                 for i in range(23):
-                    viewer.user_scn.geoms[i+1].pos = joint_gt[curr_time, i+1]
+                    viewer.user_scn.geoms[i+1].pos = joint_gt[marker_time, i+1]
+
+            if buffer_view == 'dual':
+                marker_color = (np.array([1.0, 0.55, 0.0, 1.0])
+                                if is_buffer[curr_time]
+                                else np.array([1.0, 0.0, 0.0, 1.0]))
+                for i in range(1, min(24, viewer.user_scn.ngeom)):
+                    viewer.user_scn.geoms[i].rgba = marker_color
             
             if vis_contact: 
                 viewer.user_scn.geoms[6].rgba = np.array([0, 1-curr_motion['contact_mask'][curr_time, 0], 0, 1])
@@ -205,7 +225,12 @@ def main(cfg : DictConfig) -> None:
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
                 
-            print("Frame ID: ",curr_time,'\t | Times ',f"{time_step:4f}",end='\r\b')
+            kappa_values = curr_motion.get('kappa', np.zeros(len(is_buffer)))
+            print("Frame ID: ", curr_time,
+                  "\t | Guidance: ", guidance_time,
+                  "\t | Buffer: ", bool(is_buffer[curr_time]),
+                  "\t | kappa: ", int(kappa_values[curr_time]),
+                  '\t | Times ', f"{time_step:4f}", end='\r\b')
 
     if resave:
         motion_data[curr_motion_key]['contact_mask'] = contact_mask

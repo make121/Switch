@@ -1,0 +1,61 @@
+# @package _global_
+
+# Experiment A: teacher policy with the current reference frame's normalized
+# Buffer countdown kappa appended to actor_obs. The baseline remains
+# obs_ppo_teacher.yaml and is checkpoint-compatible with existing runs.
+defaults:
+  - /obs/motion_tracking/obs_ppo_teacher
+  - _self_
+
+obs:
+  current_kappa_max: 30.0
+
+  obs_dict:
+    actor_obs: [
+      base_lin_vel,
+      base_ang_vel,
+      dof_pos,
+      dof_vel,
+      actions,
+      roll_pitch,
+      local_key_body_pos,
+      local_key_body_rot,
+      anchor_ref_pos,
+      anchor_ref_rot,
+      next_step_ref_motion,
+      current_kappa,
+    ]
+
+  obs_scales:
+    current_kappa: 1.0
+
+  noise_scales:
+    current_kappa: 0.0
+
+  obs_dims:
+    - base_lin_vel: 3
+    - base_ang_vel: 3
+    - dof_pos: ${robot.dof_obs_size}
+    - dof_vel: ${robot.dof_obs_size}
+    - actions: ${robot.dof_obs_size}
+    - local_key_body_pos: ${eval:'3 * ${robot.num_key_bodies}'}
+    - local_key_body_rot: ${eval:'6 * ${robot.num_key_bodies}'}
+    - anchor_ref_pos: 3
+    - anchor_ref_rot: 6
+    - dr_base_com: 3
+    - dr_base_mass: 1
+    - dr_kp: ${robot.dof_obs_size}
+    - dr_kd: ${robot.dof_obs_size}
+    - dr_friction: 1
+    - dr_ctrl_delay: 1
+    - contact_mask: 2
+    - root_height: 1
+    - roll_pitch: 2
+    - future_motion_root_height: 1
+    - future_motion_roll_pitch: 2
+    - future_motion_base_lin_vel: 3
+    - future_motion_base_yaw_vel: 1
+    - future_motion_dof_pos: ${robot.dof_obs_size}
+    - future_motion_local_ref_key_body_pos: ${eval:'3 * ${robot.num_key_bodies}'}
+    - next_step_ref_motion: ${eval:'1 + 2 + 3 + 1 + ${robot.dof_obs_size} + (3 * ${robot.num_key_bodies})'}
+    - current_kappa: 1

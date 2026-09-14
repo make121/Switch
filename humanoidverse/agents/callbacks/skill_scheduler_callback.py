@@ -25,7 +25,8 @@ SG_build/sg_output_V2/scheduler_config.yaml \
 [example/motion_data/Horse-stance_pose.pkl,example/motion_data/Horse-stance_punch.pkl]
 
 Optional config keys: planner_type, tau, top_k, lambda_sw, lambda_cost,
-A, B (default: from scheduler_config.yaml candidates), enabled.
+A, B (default: from scheduler_config.yaml candidates), switch_entry_A,
+enabled.
 """
 
 import numpy as np
@@ -53,6 +54,9 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         self._just_injected = False
         self._reset_detect_cooldown = 0
         self._seen_estop_count = 0
+        # Benchmark diagnostics.  This is deliberately observational: it does
+        # not alter planning or reset behaviour.
+        self.injection_history = []
 
     # ------------------------------------------------------------------
     # Setup
@@ -84,6 +88,7 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             grace_s=float(getattr(cfg, "grace_s", 1.0)),
             candidate_pool=str(getattr(cfg, "candidate_pool", "all")),
             enable_safety_replan=bool(getattr(cfg, "enable_safety_replan", False)),
+            switch_entry_A=float(getattr(cfg, "switch_entry_A", A)),
         )
         self.ref_builder = ReferenceBuilder.from_pkl_files(
             self.graph, list(cfg.skill_pkl_files))
@@ -102,10 +107,17 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         # Start tracking the skill the robot was reset into.
         initial_skill = int(getattr(cfg, "initial_skill", 0))
         self.scheduler.set_command(initial_skill)
+        # The eval motion_file is the canonical initial skill.  Mirror that
+        # already-loaded reference in the scheduler instead of planning an
+        # arbitrary graph route (and resetting) during the first eval step.
+        initial_path = self.scheduler.pure_skill_path(initial_skill)
+        self.scheduler.install_reference_path(initial_path, 0.0)
+        self._installed_version = self.scheduler.path_version
         self._initialized = True
         logger.info(
             f"SkillScheduler ready: {self.graph.skill_names}, slot={self._slot}, "
-            f"A={A:.3f}, B={B:.3f}, lambda_sw={lambda_sw}, tau={self.scheduler.tau}, "
+            f"A={A:.3f}, switch_entry_A={self.scheduler.switch_entry_A:.3f}, "
+            f"B={B:.3f}, lambda_sw={lambda_sw}, tau={self.scheduler.tau}, "
             f"top_k={self.scheduler.top_k}. Press 7/8/9/0 to command skill 0/1/2/3."
         )
 
@@ -149,9 +161,9 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         trans[:] = delta.apply(trans)
         trans[:, :2] += robot_xy_rel - trans[0, :2]
 
-        if "root_rot" in traj:  # stored wxyz
-            rr = sRot.from_quat(traj["root_rot"][:, [1, 2, 3, 0]])
-            traj["root_rot"] = (delta * rr).as_quat()[:, [3, 0, 1, 2]]
+        if "root_rot" in traj:  # PBHC and SciPy both use xyzw
+            rr = sRot.from_quat(traj["root_rot"])
+            traj["root_rot"] = (delta * rr).as_quat()
 
     def _inject(self, path, robot_yaw=None, robot_xy_rel=None, align=True,
                 note=""):
@@ -172,18 +184,23 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         env.curr_motion_ids = lib._curr_motion_ids
         env.curr_motion_keys = lib.curr_motion_keys
 
+        trigger = str(getattr(self.scheduler, "last_trigger", "?"))
+        entry_threshold = self.scheduler.switch_entry_A \
+            if trigger == "cmd_change" else self.scheduler.A
         close_entry = getattr(self.scheduler, "last_best_sim", np.inf) \
-            <= self.scheduler.A
+            <= entry_threshold
+        did_reset = not (align and close_entry)
         if align and close_entry:
-            # TRANSITION with a nearby entry (best_sim <= A): path[0] is the
-            # robot's current pose, so DO NOT physically reset -- just
-            # restart the reference clock at the new trajectory's frame 0.
+            # TRANSITION at its time-aligned source: path[0] is the current
+            # reference frame and the live error passed the applicable entry
+            # threshold, so DO NOT physically reset -- just restart the
+            # reference clock at the new trajectory's frame 0.
             env.motion_start_times[0] = \
                 -float(env.episode_length_buf[0]) * env.dt
             env.motion_len[0] = lib._motion_lengths[0]
         else:
-            # Pure-skill playback, OR a transition whose entry is far from
-            # the robot (best_sim > A): respawn into the reference's first
+            # Pure-skill playback, OR a transition whose entry is beyond its
+            # applicable threshold: respawn into the reference's first
             # frame so reference and robot agree (a far entry without reset
             # makes the robot chase a mismatched pose -> instant
             # body_z/motion_far termination, observed in the 3-skill eval).
@@ -194,15 +211,29 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
 
         n_cross = sum(1 for u, v in zip(path[:-1], path[1:])
                       if self.graph.skill_ids[u] != self.graph.skill_ids[v])
+        self.injection_history.append({
+            "step": int(env.common_step_counter),
+            "command": int(self.scheduler.current_cmd),
+            "trigger": str(getattr(self.scheduler, "last_trigger", "?")),
+            "best_sim": float(getattr(self.scheduler, "last_best_sim", np.nan)),
+            "entry_threshold": float(entry_threshold),
+            "path_nodes": int(len(path)),
+            "cross_hops": int(n_cross),
+            "buffer_nodes": int(self.graph.is_buffer[path].sum()),
+            "aligned": bool(align),
+            "physical_reset": bool(did_reset),
+        })
         logger.info(
             f"Injected path: {len(path)} nodes "
             f"({self.graph.skill_names[self.scheduler.current_cmd]}), "
             f"trigger={getattr(self.scheduler, 'last_trigger', '?')}{note}, "
             f"best_sim={getattr(self.scheduler, 'last_best_sim', float('nan')):.3f}, "
+            f"entry_threshold={entry_threshold:.3f}, "
             f"start=node{path[0]}(skill {self.graph.skill_ids[path[0]]}, "
             f"frame {self.graph.frame_idxs[path[0]]}), "
             f"cross_hops={n_cross}, "
             f"buffers={int(self.graph.is_buffer[path].sum())}, "
+            f"physical_reset={did_reset}, "
             f"traj={traj['dof'].shape[0]} frames @ {self._traj_fps}fps"
         )
 
@@ -251,9 +282,8 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
 
         # --- Reference lifecycle management (before the scheduler step) ---
         # (a) Natural env reset (fall / termination): episode_length wrapped
-        #     without our own injection. Respawn into the CURRENT commanded
-        #     skill's canonical playback from frame 0 -- "back to the skill
-        #     start pose and replay the skill".
+        #     without our own injection. The env has already reset against
+        #     the installed reference, so rewind scheduler state only.
         ep_len = int(env.episode_length_buf[0])
         natural_reset = (
             self._prev_ep_len is not None
@@ -268,11 +298,15 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         if natural_reset and self.scheduler.current_cmd is not None:
             logger.info(
                 f"Env reset detected ({getattr(self, '_last_termination', '?')})"
-                f" -> respawn into pure skill "
-                f"{self.scheduler.current_cmd} "
-                f"({self.graph.skill_names[self.scheduler.current_cmd]})")
-            self._inject_pure_skill(self.scheduler.current_cmd, t)
-            self._prev_ep_len = 0
+                f" -> retry current loaded reference without MotionLib reload "
+                f"(command {self.scheduler.current_cmd}: "
+                f"{self.graph.skill_names[self.scheduler.current_cmd]})")
+            # env.step() has already performed the physical reset using the
+            # currently installed trajectory.  Reloading MotionLib and then
+            # calling reset_envs_idx() here caused a second reset and repeated
+            # native segfaults in the lie_down/get_up test.
+            self.scheduler.rewind_reference(t)
+            self._prev_ep_len = ep_len
             return actor_state
 
         # (b) Reference playback finished (transition completed / skill
@@ -290,6 +324,35 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
                 self.scheduler.guidance_seq[self.scheduler.pointer].node_id
 
         self.scheduler.step(x, user_cmd, t)
+
+        rejection_count = self.scheduler.entry_rejection_count
+        if rejection_count != getattr(self, "_seen_entry_rejections", 0):
+            self._seen_entry_rejections = rejection_count
+            source = self.scheduler.last_rejected_source
+            logger.warning(
+                f"Rejected Buffer entry node{source} "
+                f"(skill {self.graph.skill_ids[source]}, "
+                f"frame {self.graph.frame_idxs[source]}): "
+                f"entry_sim={self.scheduler.last_rejected_entry_sim:.3f} > "
+                f"switch_entry_A={self.scheduler.switch_entry_A:.3f}; "
+                f"continuing current reference")
+
+        pending = self.scheduler.pending_cmd
+        pending_source = self.scheduler.pending_source
+        pending_state = (pending, pending_source)
+        if pending_state != getattr(self, "_last_pending_state", None):
+            self._last_pending_state = pending_state
+            if pending is not None:
+                if pending_source is None:
+                    logger.info(
+                        f"Pending switch -> {self.graph.skill_names[pending]}: "
+                        f"waiting for a future Buffer macro source")
+                else:
+                    logger.info(
+                        f"Pending switch -> {self.graph.skill_names[pending]}: "
+                        f"future entry=node{pending_source} "
+                        f"(skill {self.graph.skill_ids[pending_source]}, "
+                        f"frame {self.graph.frame_idxs[pending_source]})")
 
         if self.scheduler.path_version != self._installed_version:
             if self.scheduler.current_path:

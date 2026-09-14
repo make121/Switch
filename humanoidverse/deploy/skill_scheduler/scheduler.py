@@ -14,7 +14,7 @@ Deliberately NOT implemented yet:
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Set, Tuple, Union
 
 from .distance import NodeState
 from .graph_data import SkillGraphData
@@ -35,13 +35,23 @@ class SkillGraphScheduler:
                  tau: float, top_k: int, grace_s: float = 0.0,
                  candidate_pool: str = "all",
                  enable_safety_replan: bool = False,
-                 nn_buffer_base: float = 1.0, nn_max_buffer: int = 30):
+                 nn_buffer_base: float = 1.0, nn_max_buffer: int = 30,
+                 switch_entry_A: Optional[float] = None):
         if planner_type not in ("graph_search", "nn"):
             raise ValueError(f"bad planner_type: {planner_type!r}")
         self.graph = graph
         self.planner_type = planner_type
         self.A = A
         self.B = B
+        # A is calibrated for graph attachment/search.  A live policy does
+        # not sit exactly on its reference node, so applying that same tight
+        # threshold at a time-aligned Buffer source can reject every switch.
+        # Keep a separate threshold for that one operation; defaulting to A
+        # preserves the old behaviour for callers that do not opt in.
+        self.switch_entry_A = (
+            float(A) if switch_entry_A is None else float(switch_entry_A))
+        if self.switch_entry_A <= 0:
+            raise ValueError("switch_entry_A must be positive")
         self.lambda_cost = lambda_cost
         self.tau = tau
         self.top_k = top_k
@@ -81,6 +91,23 @@ class SkillGraphScheduler:
         # reference into the motion library.
         self.current_path: List[int] = []
         self.path_version: int = 0
+        # A graph-search command change is intentionally two-phase.  The
+        # command is queued first while the current reference keeps running;
+        # it is installed only when the reference reaches a *future* source
+        # node of a precomputed Buffer macro and the live robot is close to
+        # that source.  This prevents attaching directly to a target-skill
+        # middle frame or to a Buffer interior node.
+        self.pending_cmd: Optional[int] = None
+        self.pending_source: Optional[int] = None
+        self.pending_path: List[int] = []
+        self._pending_rejected_sources: Set[int] = set()
+        self.entry_rejection_count: int = 0
+        self.last_rejected_source: Optional[int] = None
+        self.last_rejected_entry_sim: Optional[float] = None
+        self._buffer_macros_by_source = {}
+        for (src, dst), buffers in self.graph.buffer_chains.items():
+            self._buffer_macros_by_source.setdefault(src, []).append(
+                (dst, buffers))
 
     # ------------------------------------------------------------------
     # Command / target set
@@ -90,6 +117,24 @@ class SkillGraphScheduler:
         sid = self.graph.skill_index(skill)
         self.current_cmd = sid
         self.T_cmd = self.graph.target_set(sid, self.tau)
+
+    def _clear_pending_command(self):
+        self.pending_cmd = None
+        self.pending_source = None
+        self.pending_path = []
+        self._pending_rejected_sources.clear()
+
+    def _queue_command(self, skill: Union[str, int]):
+        sid = self.graph.skill_index(skill)
+        if sid == self.current_cmd:
+            self._clear_pending_command()
+            return
+        if sid != self.pending_cmd:
+            self.pending_cmd = sid
+            self.pending_source = None
+            self.pending_path = []
+            self._pending_rejected_sources.clear()
+            self.last_trigger = "cmd_pending"
 
     # ------------------------------------------------------------------
     # Spec 3: entry check
@@ -125,6 +170,106 @@ class SkillGraphScheduler:
             if nxt is None:
                 return path
             path.append(nxt)
+
+    def _buffer_path_from_source(
+            self, source: int, target_set: List[int]) -> Optional[List[int]]:
+        """Best target-reaching path that takes a Buffer macro immediately.
+
+        The regular value function is reused unchanged.  This method merely
+        constrains the first edge to one of ``source``'s precomputed Buffer
+        chains, which is the online execution contract for command changes.
+        """
+        if self.planner_type != "graph_search":
+            return None
+        V, next_hop = self.planner.build_value_function(target_set)
+        target_nodes = set(target_set)
+        options: List[Tuple[float, List[int]]] = []
+        for dst, buffers in self._buffer_macros_by_source.get(source, []):
+            if dst not in V:
+                continue
+            suffix = self.planner.reconstruct_path_gs(
+                dst, next_hop, target_nodes)
+            if suffix is None:
+                continue
+            path = [source] + list(buffers) + suffix
+            # macro cost + the already-computed cost-to-target from dst
+            cost = self.graph.macro_edge_costs[(source, dst)] + V[dst]
+            options.append((cost, path))
+        if not options:
+            return None
+        _, best = min(options, key=lambda item: item[0])
+        return self._extend_to_skill_end(best)
+
+    def _find_forward_buffer_entry(self) -> Tuple[Optional[int], List[int]]:
+        """Find the earliest usable Buffer source ahead in reference time."""
+        if self.pending_cmd is None or not self.guidance_seq:
+            return None, []
+        target_set = self.graph.target_set(self.pending_cmd, self.tau)
+        current_node = self.guidance_seq[self.pointer].node_id
+        current_skill = int(self.graph.skill_ids[current_node])
+        if current_skill < 0:
+            # Never attach from a Buffer interior.  Let the installed
+            # transition reach an original-skill frame first.
+            return None, []
+
+        for guidance in self.guidance_seq[self.pointer:]:
+            nid = guidance.node_id
+            sid = int(self.graph.skill_ids[nid])
+            if sid < 0:
+                continue
+            if sid != current_skill:
+                break
+            if nid in self._pending_rejected_sources:
+                continue
+            path = self._buffer_path_from_source(nid, target_set)
+            if path is not None:
+                return nid, path
+        return None, []
+
+    def _step_pending_command(
+            self, x: NodeState, t: float) -> Optional[Guidance]:
+        """Keep current guidance until a safe future Buffer source arrives."""
+        source, path = self._find_forward_buffer_entry()
+        self.pending_source = source
+        self.pending_path = path
+        current = self.current_guidance()
+        if source is None or current is None or current.node_id != source:
+            return current
+
+        entry_sim = self.graph.sim_to(x, source)
+        self.last_best_sim = entry_sim
+        if entry_sim > self.switch_entry_A:
+            # Do not jump or reset.  Continue the current skill and try the
+            # next future macro source instead.
+            self._pending_rejected_sources.add(source)
+            self.entry_rejection_count += 1
+            self.last_rejected_source = source
+            self.last_rejected_entry_sim = entry_sim
+            self.pending_source = None
+            self.pending_path = []
+            self.last_trigger = "cmd_wait_entry_error"
+            return current
+
+        target = self.pending_cmd
+        self.set_command(target)
+        self.last_trigger = "cmd_change"
+        self.install_reference_path(path, t)
+        self._clear_pending_command()
+        return self.guidance_seq[0]
+
+    def rewind_reference(self, t: float):
+        """Synchronize with an env reset without rebuilding MotionLib.
+
+        The environment has already reset itself against the currently loaded
+        trajectory.  Rewinding the scheduler avoids the previous second
+        load_motions()+reset_envs_idx() pair, which could crash Isaac Gym.
+        """
+        self.pointer = 0
+        self.estopped = False
+        self._grace_until = t + self.grace_s
+        self.pending_source = None
+        self.pending_path = []
+        self._pending_rejected_sources.clear()
 
     def plan(self, x: NodeState, candidates: List[int],
              T_cmd: List[int]) -> Optional[List[int]]:
@@ -210,6 +355,19 @@ class SkillGraphScheduler:
             else:
                 return None
 
+        # Graph-search command changes are deferred to a future Buffer macro
+        # source.  Initialisation and the NN planner retain their established
+        # immediate planning behaviour.
+        if user_cmd is not None and self.current_cmd is not None \
+                and self.guidance_seq and self.planner_type == "graph_search":
+            requested = self.graph.skill_index(user_cmd)
+            if requested != self.current_cmd:
+                self._queue_command(requested)
+            elif self.pending_cmd is not None:
+                self._clear_pending_command()
+            if self.pending_cmd is not None:
+                return self._step_pending_command(x, t)
+
         trigger = None
         if self.current_cmd is None or not self.guidance_seq:
             trigger = "init"
@@ -279,5 +437,10 @@ class SkillGraphScheduler:
                 "entry_check" if entry_status == "estop" else "plan_failed")
             return None
 
+        # `entry_check` records the nearest candidate, but a reachability
+        # fallback may select another path start. Consumers use this value to
+        # decide whether a physical reset is required, so it must describe
+        # the path that will actually be installed.
+        self.last_best_sim = self.graph.sim_to(x, path[0])
         self.install_reference_path(path, t)
         return self.guidance_seq[0]

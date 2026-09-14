@@ -67,6 +67,13 @@ class SkillGraphData:
     w_qdot: float = 1.0
     w_p: float = 1.0
     lambda_sw: float = 5.0
+    # A cross-skill edge is a macro edge.  When it owns Buffer nodes, the raw
+    # direct edge is retained here as metadata but replaced in adj/rev_adj by
+    # src -> buffers -> dst.  The expanded edge weights sum to the macro cost.
+    buffer_chains: Dict[Tuple[int, int], Tuple[int, ...]] = field(
+        default_factory=dict)
+    macro_edge_costs: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    expanded_macro_edges: int = 0
 
     @classmethod
     def from_json(cls, path: str, sigma_q: float, sigma_qdot: float,
@@ -101,6 +108,24 @@ class SkillGraphData:
         for bn in g.get("buffer_nodes", []):
             buffer_src[bn["global_id"]] = bn["src_node"]
             buffer_dst[bn["global_id"]] = bn["dst_node"]
+
+        # Group Buffer nodes by the exact cross-skill macro edge they expand.
+        # kappa is N..1 along a chain, hence descending kappa is path order.
+        grouped_buffers: Dict[Tuple[int, int], List[int]] = {}
+        for bn in g.get("buffer_nodes", []):
+            src = int(bn["src_node"])
+            dst = int(bn["dst_node"])
+            if not (0 <= src < len(g["nodes"]) and
+                    0 <= dst < len(g["nodes"])):
+                continue
+            grouped_buffers.setdefault((src, dst), []).append(
+                int(bn["global_id"]))
+        buffer_chains = {
+            key: tuple(sorted(ids,
+                              key=lambda nid: int(g["nodes"][nid]["kappa"]),
+                              reverse=True))
+            for key, ids in grouped_buffers.items()
+        }
         graph = cls(
             nodes=nodes,
             skill_ids=np.asarray([n["skill_id"] for n in g["nodes"]], dtype=np.int64),
@@ -113,20 +138,67 @@ class SkillGraphData:
             skill_lengths=[int(x) for x in g["skill_lengths"]],
             sigma_q=sigma_q, sigma_qdot=sigma_qdot, sigma_p=sigma_p,
             w_q=w_q, w_qdot=w_qdot, w_p=w_p, lambda_sw=lambda_sw,
+            buffer_chains=buffer_chains,
         )
         n = len(nodes)
         graph.adj = [[] for _ in range(n)]
         graph.rev_adj = [[] for _ in range(n)]
+
+        def add_runtime_edge(u: int, v: int, w: float, et: str):
+            graph.adj[u].append((v, w, et))
+            graph.rev_adj[v].append((u, w, et))
+            graph.d_uv[(u, v)] = sim(
+                nodes[u], nodes[v], sigma_q, sigma_qdot, sigma_p,
+                w_q, w_qdot, w_p)
+
+        # Compute the deployment-time total cost of every raw cross-skill
+        # macro edge before constructing the searchable adjacency.
+        for e in g["edges"]:
+            if edge_class(e) != EDGE_CROSS:
+                continue
+            u, v = int(e["src"]), int(e["dst"])
+            d = sim(nodes[u], nodes[v], sigma_q, sigma_qdot, sigma_p,
+                    w_q, w_qdot, w_p)
+            graph.macro_edge_costs[(u, v)] = deploy_edge_weight(
+                EDGE_CROSS, d, int(graph.skill_ids[u]),
+                int(graph.skill_ids[v]), lambda_sw)
+
+        # Load temporal edges and cross-skill macros without a Buffer chain.
+        # Raw Buffer edges are reconstructed below with cost conservation.
         for e in g["edges"]:
             u, v = int(e["src"]), int(e["dst"])
             et = edge_class(e)
+            if et == EDGE_BUFFER:
+                continue
+            if et == EDGE_CROSS and (u, v) in graph.buffer_chains:
+                graph.expanded_macro_edges += 1
+                continue
             d = sim(nodes[u], nodes[v], sigma_q, sigma_qdot, sigma_p,
                     w_q, w_qdot, w_p)
             w = deploy_edge_weight(et, d, int(graph.skill_ids[u]),
                                    int(graph.skill_ids[v]), lambda_sw)
-            graph.adj[u].append((v, w, et))
-            graph.rev_adj[v].append((u, w, et))
-            graph.d_uv[(u, v)] = d
+            add_runtime_edge(u, v, w, et)
+
+        # Expand each buffered macro into N+1 searchable Buffer edges.  Use
+        # equal shares so the path has exactly the same total cost as the raw
+        # direct macro; lambda_sw is therefore charged once, not once per
+        # boundary involving a skill_id=-1 Buffer node.
+        for (src, dst), buffers in graph.buffer_chains.items():
+            macro_cost = graph.macro_edge_costs.get((src, dst))
+            if macro_cost is None:
+                # Backward-compatible fallback for artifacts that contain a
+                # Buffer chain but omitted its raw macro edge.
+                d = sim(nodes[src], nodes[dst], sigma_q, sigma_qdot, sigma_p,
+                        w_q, w_qdot, w_p)
+                macro_cost = deploy_edge_weight(
+                    EDGE_CROSS, d, int(graph.skill_ids[src]),
+                    int(graph.skill_ids[dst]), lambda_sw)
+                graph.macro_edge_costs[(src, dst)] = macro_cost
+                graph.expanded_macro_edges += 1
+            chain = (src,) + buffers + (dst,)
+            hop_cost = macro_cost / (len(chain) - 1)
+            for u, v in zip(chain[:-1], chain[1:]):
+                add_runtime_edge(u, v, hop_cost, EDGE_BUFFER)
         return graph
 
     @property

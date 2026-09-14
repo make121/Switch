@@ -163,10 +163,12 @@ def main(override_config: OmegaConf):
     config.env.config.ckpt_dir = str(checkpoint.parent) # commented out for now, might need it back to save motion
     env = instantiate(config.env, device=device)
 
-    # Start a thread to listen for key press
-    key_listener_thread = threading.Thread(target=listen_for_keypress, args=(env,))
-    key_listener_thread.daemon = True
-    key_listener_thread.start()
+    # A keyboard listener is useful for interactive evaluation, but it cannot
+    # connect to an X server in deterministic/headless benchmark runs.
+    if not config.headless:
+        key_listener_thread = threading.Thread(target=listen_for_keypress, args=(env,))
+        key_listener_thread.daemon = True
+        key_listener_thread.start()
 
     algo: BaseAlgo = instantiate(config.algo, env=env, device=device, log_dir=None)
     algo.setup()
@@ -204,7 +206,11 @@ def main(override_config: OmegaConf):
 
         logger.info(f'Exported policy as onnx to: {os.path.join(exported_policy_path, exported_onnx_name)}')
 
-    algo.evaluate_policy()
+    eval_steps = config.get("eval_steps", None)
+    if eval_steps is None:
+        algo.evaluate_policy()
+    else:
+        algo.evaluate_policy_steps(int(eval_steps))
 
 
 if __name__ == "__main__":

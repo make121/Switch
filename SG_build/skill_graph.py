@@ -285,7 +285,7 @@ class SkillGraphBuilder:
                 if "root_rot" in motion and "root_trans_offset" in motion:
                     rto = motion["root_trans_offset"].copy()
                     rr = motion["root_rot"].copy()
-                    r = R.from_quat(rr[:, [1, 2, 3, 0]])  # xyzw→wxyz
+                    r = R.from_quat(rr)
                     yaws = r.as_euler('xyz')[:, 2]
 
                     # Circular mean: atan2(mean(sin), mean(cos))
@@ -294,15 +294,30 @@ class SkillGraphBuilder:
 
                     # Apply to root_rot (all frames aligned to yaw≈0)
                     r_aligned = yaw_correction * r
-                    motion["root_rot"] = r_aligned.as_quat()[:, [3, 0, 1, 2]]  # wxyz→xyzw
+                    motion["root_rot"] = r_aligned.as_quat()
+
+                    if "pose_aa" in motion:
+                        pose_aa = motion["pose_aa"].copy()
+                        pose_aa[:, 0, :] = r_aligned.as_rotvec()
+                        motion["pose_aa"] = pose_aa
 
                     # Apply to root_trans x-y (rotate, then center)
                     rot_xy_3d = yaw_correction.apply(
                         np.column_stack([rto[:, :2], np.zeros(len(rto))])
                     )
-                    rto[:, 0] = rot_xy_3d[:, 0] - rot_xy_3d[:, 0].mean()
-                    rto[:, 1] = rot_xy_3d[:, 1] - rot_xy_3d[:, 1].mean()
+                    center_x = rot_xy_3d[:, 0].mean()
+                    center_y = rot_xy_3d[:, 1].mean()
+                    rto[:, 0] = rot_xy_3d[:, 0] - center_x
+                    rto[:, 1] = rot_xy_3d[:, 1] - center_y
                     motion["root_trans_offset"] = rto
+
+                    if "smpl_joints" in motion:
+                        joints = motion["smpl_joints"].copy()
+                        shape = joints.shape
+                        joints = yaw_correction.apply(joints.reshape(-1, 3)).reshape(shape)
+                        joints[..., 0] -= center_x
+                        joints[..., 1] -= center_y
+                        motion["smpl_joints"] = joints
                 self._motions.append(motion)
                 feats = FrameFeatures.from_motion(motion)
                 self._features.append(feats)
@@ -439,20 +454,21 @@ class SkillGraphBuilder:
             + alpha * dst_motion["root_trans_offset"][t_dst]
         )
 
-        # Root rotation: SLERP
+        # Root rotation: SLERP (PBHC and SciPy both use xyzw).
+        root_rotvec = None
         if "root_rot" in src_motion:
-            r_src = R.from_quat(src_motion["root_rot"][t_src][[1, 2, 3, 0]])  # xyzw→wxyz
-            r_dst = R.from_quat(dst_motion["root_rot"][t_dst][[1, 2, 3, 0]])
+            r_src = R.from_quat(src_motion["root_rot"][t_src])
+            r_dst = R.from_quat(dst_motion["root_rot"][t_dst])
             slerp = Slerp([0, 1], R.concatenate([r_src, r_dst]))
-            r_interp = slerp(alpha).as_quat()[[3, 0, 1, 2]]  # wxyz→xyzw
-            if r_interp.shape == (4,):
-                frame["root_rot"] = r_interp
-            else:
-                frame["root_rot"] = r_interp[0]
+            r_interp = slerp(float(alpha))
+            frame["root_rot"] = r_interp.as_quat()
+            root_rotvec = r_interp.as_rotvec()
 
         # pose_aa: linear interpolation (approximate)
         if "pose_aa" in src_motion:
             frame["pose_aa"] = (1 - alpha) * src_motion["pose_aa"][t_src] + alpha * dst_motion["pose_aa"][t_dst]
+            if root_rotvec is not None:
+                frame["pose_aa"][0] = root_rotvec
 
         # smpl_joints: linear interpolation
         if "smpl_joints" in src_motion:

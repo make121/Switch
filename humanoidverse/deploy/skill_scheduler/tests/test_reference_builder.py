@@ -15,8 +15,12 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 import yaml
+from scipy.spatial.transform import Rotation as R
 
-from SG_build.skill_graph_V2 import interpolate_frame
+from SG_build.skill_graph_V2 import (
+    align_motion_to_pose,
+    interpolate_frame,
+)
 from humanoidverse.deploy.skill_scheduler.graph_data import SkillGraphData
 from humanoidverse.deploy.skill_scheduler.reference_builder import ReferenceBuilder
 
@@ -86,9 +90,14 @@ def test_buffer_chain():
     # Buffer frame k must equal interpolate_frame with alpha = k/(N+1)
     s_skill, s_f = int(graph.skill_ids[src]), int(graph.frame_idxs[src])
     d_skill, d_f = int(graph.skill_ids[dst]), int(graph.frame_idxs[dst])
+    src_motion = rb.motions[s_skill]
+    src_yaw = R.from_quat(src_motion["root_rot"][s_f]).as_euler("xyz")[2]
+    dst_motion = align_motion_to_pose(
+        rb.motions[d_skill], d_f,
+        src_motion["root_trans_offset"][s_f, :2], src_yaw)
     for k in range(1, n_buf + 1):
-        expected = interpolate_frame(rb.motions[s_skill], rb.motions[d_skill],
-                                     s_f, d_f, k / (n_buf + 1))
+        expected = interpolate_frame(src_motion, dst_motion, s_f, d_f,
+                                     k / (n_buf + 1))
         assert np.allclose(traj["dof"][k], expected["dof"])
         assert np.allclose(traj["pose_aa"][k], expected["pose_aa"])
         # contact_mask of buffer frames comes from the DST frame
@@ -100,6 +109,36 @@ def test_buffer_chain():
     assert np.allclose(traj["dof"][-1], rb.motions[d_skill]["dof"][d_f])
     print(f"PASS test_buffer_chain (chain len {len(chain)}, "
           f"{n_buf} buffers, src skill {s_skill} -> dst skill {d_skill})")
+
+
+def test_edge_local_se2_alignment():
+    graph, rb = setup()
+    src = rb.motions[0]
+    dst = rb.motions[1]
+    s_f, d_f = 100, 80
+    src_yaw = R.from_quat(src["root_rot"][s_f]).as_euler("xyz")[2]
+    before = dst["root_trans_offset"].copy()
+    aligned = align_motion_to_pose(
+        dst, d_f, src["root_trans_offset"][s_f, :2], src_yaw)
+
+    assert np.array_equal(dst["root_trans_offset"], before), \
+        "alignment must not mutate source data"
+    assert np.allclose(aligned["root_trans_offset"][d_f, :2],
+                       src["root_trans_offset"][s_f, :2], atol=1e-7)
+    aligned_yaw = R.from_quat(
+        aligned["root_rot"][d_f]).as_euler("xyz")[2]
+    yaw_error = np.arctan2(np.sin(aligned_yaw - src_yaw),
+                           np.cos(aligned_yaw - src_yaw))
+    assert abs(yaw_error) < 1e-7
+
+    # A rigid planar transform preserves all relative XY distances.
+    raw_rel = dst["root_trans_offset"][:, :2] \
+        - dst["root_trans_offset"][d_f, :2]
+    aligned_rel = aligned["root_trans_offset"][:, :2] \
+        - aligned["root_trans_offset"][d_f, :2]
+    assert np.allclose(np.linalg.norm(raw_rel, axis=1),
+                       np.linalg.norm(aligned_rel, axis=1), atol=1e-6)
+    print("PASS test_edge_local_se2_alignment")
 
 
 def test_contact_mask_present():
@@ -170,6 +209,7 @@ def test_nn_path_builds_trajectory():
 def main():
     test_original_path()
     test_buffer_chain()
+    test_edge_local_se2_alignment()
     test_contact_mask_present()
     test_xy_continuity_across_skills()
     test_nn_path_builds_trajectory()

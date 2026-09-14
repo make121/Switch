@@ -62,12 +62,17 @@ python humanoidverse/deploy/skill_scheduler/calibrate.py sg_output/skill_graph.j
 | `--subsample` | 3 | 源帧采样步长 (1=每帧, 3=每三帧) |
 | `--exclude-boundary` | 10 | 排除起始/目标节点在技能前后 N 帧内的轨迹 |
 | `--max-trajectories` | 10 | 每对技能最多收集的轨迹数，遍历所有边直到达标 |
+| `--transition-selection` | distance | `distance` 取全局最易边；`phase` 按源技能时间覆盖选边 |
+| `--phase-bins` | 16 | `phase` 模式下源技能的时间分桶数 |
+| `--edges-per-bin` | 1 | 每个时间桶、每个有向技能对保留的代表边数 |
 
 **参数调节建议**：
 - `--threshold` 越小 → 只连接非常相似的状态 → 过渡更可靠但更少
 - `--buffer-base` 越小 → 更多 buffer 节点 → 过渡更平滑但训练数据更大
 - `--subsample 1` → 每帧都计算跨技能边 → 全面但慢
 - `--exclude-boundary 0` → 不排除边界帧，允许所有跨技能过渡
+- 覆盖优先重建建议使用 `--topk 1 --transition-selection phase
+  --phase-bins 16 --edges-per-bin 2`；最终图只保留同时导出为训练轨迹的宏边。
 
 ## 算法流程 (对应论文章节)
 
@@ -142,7 +147,43 @@ python humanoidverse/train_agent.py \
     seed=1 +device=cuda:0
 ```
 
-> **注意**: 当前 PBHC 的 buffer-aware imitation (用目标帧监督 buffer 节点) 尚未集成，需在 reward 函数中检查 `is_buffer` 标记并调整监督目标。
+### Current-kappa observation ablation
+
+Newly generated transition entries contain both per-frame `is_buffer` and
+`kappa` (`N, N-1, ..., 1` inside each Buffer segment and `0` elsewhere).
+Legacy generated datasets that only contain `is_buffer` remain supported:
+MotionLib derives the same countdown at load time.
+
+For a controlled observation-only ablation, keep the motion data, seed,
+rewards, and all other settings identical:
+
+```bash
+# Baseline: no kappa in actor observation
+python humanoidverse/train_agent.py \
+  +simulator=isaacgym +exp=general_tracking +terrain=terrain_locomotion_plane \
+  project_name=MotionTracking num_envs=4096 \
+  +obs=motion_tracking/obs_ppo_teacher \
+  +robot=g1/g1_23dof_general +domain_rand=main \
+  +rewards=motion_tracking/general_main \
+  experiment_name=buffer-baseline \
+  robot.motion.motion_file="SG_build/sg_output_mm/merged_training.pkl" \
+  robot.motion.cross_skill_ratio=0.5 seed=1 +device=cuda:0
+
+# Experiment A: normalized current kappa appended to actor_obs
+python humanoidverse/train_agent.py \
+  +simulator=isaacgym +exp=general_tracking +terrain=terrain_locomotion_plane \
+  project_name=MotionTracking num_envs=4096 \
+  +obs=motion_tracking/obs_ppo_teacher_kappa \
+  +robot=g1/g1_23dof_general +domain_rand=main \
+  +rewards=motion_tracking/general_main \
+  experiment_name=buffer-current-kappa \
+  robot.motion.motion_file="SG_build/sg_output_mm/merged_training.pkl" \
+  robot.motion.cross_skill_ratio=0.5 seed=1 +device=cuda:0
+```
+
+`obs.current_kappa_max` defaults to `30.0`, matching the Skill Graph default
+`--max-buffer`. The policy receives `clip(kappa / current_kappa_max, 0, 1)`.
+This stage does not change rewards, termination, or future-reference inputs.
 
 ## 依赖
 

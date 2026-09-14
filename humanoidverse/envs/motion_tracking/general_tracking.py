@@ -407,11 +407,11 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         """
         # base position
         # breakpoint()
+        motion_times = self.episode_length_buf * self.dt + self.motion_start_times
+        motion_res = self._motion_lib.get_physical_state(
+            self.motion_ids, motion_times, offset=self.env_origins)
+
         if self.custom_origins:  # trimesh
-            motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times  # next frames so +1
-            offset = self.env_origins
-            # motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
-            motion_res = self.kick_motion_res()
 
             self.simulator.robot_root_states[env_ids, :3] = motion_res["root_pos"][env_ids]
             if self.config.simulator.config.name == "isaacgym":
@@ -425,11 +425,6 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
             self.simulator.robot_root_states[env_ids, 10:13] = motion_res["root_ang_vel"][env_ids]
 
         else:
-            # motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times # next frames so +1
-            # offset = self.env_origins
-            # motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
-            motion_res = self.kick_motion_res()
-
             root_pos_noise = self.config.init_noise_scale.root_pos * self.config.noise_to_initial_level
             root_rot_noise = self.config.init_noise_scale.root_rot * 3.14 / 180 * self.config.noise_to_initial_level
             root_vel_noise = self.config.init_noise_scale.root_vel * self.config.noise_to_initial_level
@@ -492,7 +487,8 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         # print("DEBUG: reset", len(self.motions_for_saving['dof']))
         motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times
         offset = self.env_origins
-        motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
+        motion_res = self._motion_lib.get_physical_state(
+            self.motion_ids, motion_times, offset=offset)
         # motion_res = self.kick_motion_res()
 
         dof_pos_noise = self.config.init_noise_scale.dof_pos * self.config.noise_to_initial_level
@@ -513,7 +509,8 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
 
         motion_times = (self.episode_length_buf + 1) * self.dt + self.motion_start_times  # next frames so +1
         offset = self.env_origins
-        self._kick_motion_res_buffer = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
+        self._kick_motion_res_buffer = self._motion_lib.get_guidance_state(
+            self.motion_ids, motion_times, offset=offset)
 
         return self._kick_motion_res_buffer
 
@@ -532,7 +529,8 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         obs_motion_times = self.tar_obs_steps * self.dt + motion_times[:, None]
         motion_ids = self.motion_ids[:, None].expand(-1, num_steps)
         offset = self.env_origins[:, None, :].expand(-1, num_steps, -1)
-        motion_res = self._motion_lib.get_motion_state(motion_ids, obs_motion_times, offset)
+        motion_res = self._motion_lib.get_guidance_state(
+            motion_ids, obs_motion_times, offset)
 
         root_rot = motion_res["root_rot"]
         root_pos = motion_res["root_pos"]
@@ -610,6 +608,14 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         ref_joint_pos = motion_res["dof_pos"]  # [num_envs, num_dofs]
         self.ref_joint_pos = ref_joint_pos.clone()
         ref_joint_vel = motion_res["dof_vel"]  # [num_envs, num_dofs]
+        self.ref_is_buffer = motion_res["is_buffer"]
+        self.ref_kappa = motion_res["kappa"]
+        kappa_max = float(getattr(self.config.obs, "current_kappa_max", 30.0))
+        if kappa_max <= 0:
+            raise ValueError("obs.current_kappa_max must be positive")
+        self.ref_current_kappa = torch.clamp(
+            self.ref_kappa / kappa_max, min=0.0, max=1.0
+        )
 
         ################### EXTEND Rigid body POS #####################
         rotated_pos_in_parent = my_quat_rotate(  # XYZW
@@ -903,6 +909,14 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         if self.ref_contact_mask is None:
             raise ValueError("Contact mask is not available. Ensure that the motion library has contact mask data.")
         return self.ref_contact_mask
+
+    def _get_obs_current_kappa(self):
+        """Normalized remaining Buffer steps for the active reference frame.
+
+        Plain motion frames return 0. Buffer frames return kappa divided by
+        obs.current_kappa_max, so the observation remains in [0, 1].
+        """
+        return self.ref_current_kappa
 
     def _get_obs_root_height(self):
         return self._obs_root_height

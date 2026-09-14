@@ -452,11 +452,11 @@ class LeggedRobotMotionTracking(LeggedRobotBase):
         """
         # base position
         # breakpoint()
+        motion_times = self.episode_length_buf * self.dt + self.motion_start_times
+        motion_res = self._motion_lib.get_physical_state(
+            self.motion_ids, motion_times, offset=self.env_origins)
+
         if self.custom_origins: # trimesh
-            motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times # next frames so +1
-            offset = self.env_origins
-            # motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
-            motion_res = self.kick_motion_res()
 
             self.simulator.robot_root_states[env_ids, :3] = motion_res['root_pos'][env_ids]
             if self.config.simulator.config.name == 'isaacgym':
@@ -471,13 +471,6 @@ class LeggedRobotMotionTracking(LeggedRobotBase):
             
 
         else:
-            # motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times # next frames so +1
-            # offset = self.env_origins
-            # motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
-            motion_res = self.kick_motion_res()
-
-
-
             root_pos_noise = self.config.init_noise_scale.root_pos * self.config.noise_to_initial_level
             root_rot_noise = self.config.init_noise_scale.root_rot * 3.14 / 180 * self.config.noise_to_initial_level
             root_vel_noise = self.config.init_noise_scale.root_vel * self.config.noise_to_initial_level
@@ -530,10 +523,9 @@ class LeggedRobotMotionTracking(LeggedRobotBase):
             env_ids (List[int]): Environemnt ids
         """
         # print("DEBUG: reset", len(self.motions_for_saving['dof']))
-        # motion_times = (self.episode_length_buf) * self.dt + self.motion_start_times # next frames so +1
-        # offset = self.env_origins
-        # motion_res = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
-        motion_res = self.kick_motion_res()
+        motion_times = self.episode_length_buf * self.dt + self.motion_start_times
+        motion_res = self._motion_lib.get_physical_state(
+            self.motion_ids, motion_times, offset=self.env_origins)
 
         dof_pos_noise = self.config.init_noise_scale.dof_pos * self.config.noise_to_initial_level
         dof_vel_noise = self.config.init_noise_scale.dof_vel * self.config.noise_to_initial_level
@@ -553,7 +545,8 @@ class LeggedRobotMotionTracking(LeggedRobotBase):
         
         motion_times = (self.episode_length_buf + 1) * self.dt + self.motion_start_times # next frames so +1
         offset = self.env_origins
-        self._kick_motion_res_buffer = self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
+        self._kick_motion_res_buffer = self._motion_lib.get_guidance_state(
+            self.motion_ids, motion_times, offset=offset)
         
         return self._kick_motion_res_buffer
     
@@ -569,7 +562,8 @@ class LeggedRobotMotionTracking(LeggedRobotBase):
         for i in range(self.config.obs.future_ref_steps):
             motion_times = (self.episode_length_buf + 1 + i) * self.dt + self.motion_start_times
             offset = self.env_origins
-            motion= self._motion_lib.get_motion_state(self.motion_ids, motion_times, offset=offset)
+            motion = self._motion_lib.get_guidance_state(
+                self.motion_ids, motion_times, offset=offset)
             for k, v in motion.items():
                 if k not in buffer:
                     buffer[k] = []

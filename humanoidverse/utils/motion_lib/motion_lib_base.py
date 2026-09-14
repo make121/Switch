@@ -19,6 +19,10 @@ from rich.progress import track
 
 from humanoidverse.utils.motion_lib.motion_utils.flags import flags
 from humanoidverse.utils.motion_lib.skeleton import SkeletonTree
+from humanoidverse.utils.motion_lib.buffer_metadata import (
+    buffer_target_indices,
+    prepare_buffer_metadata,
+)
 
 
 class FixHeightMode(Enum):
@@ -167,6 +171,27 @@ class MotionLibBase:
         raise RuntimeError("You Should not call it.")
 
     def get_motion_state(self, motion_ids, motion_times, offset=None):
+        """Backward-compatible alias for policy guidance state.
+
+        During a Buffer interval the policy is guided by the first regular
+        frame after that Buffer.  Reset/RSI code must use
+        :meth:`get_physical_state` instead so it receives the actual stored
+        (interpolated) Buffer pose rather than being teleported to the goal.
+        """
+        return self.get_guidance_state(motion_ids, motion_times, offset)
+
+    def get_guidance_state(self, motion_ids, motion_times, offset=None):
+        """State used by policy observations, rewards and visualization."""
+        return self._get_motion_state(
+            motion_ids, motion_times, offset, use_buffer_target=True)
+
+    def get_physical_state(self, motion_ids, motion_times, offset=None):
+        """Actual stored trajectory state used to initialize the simulator."""
+        return self._get_motion_state(
+            motion_ids, motion_times, offset, use_buffer_target=False)
+
+    def _get_motion_state(self, motion_ids, motion_times, offset=None,
+                          use_buffer_target=True):
         motion_len = self._motion_lengths[motion_ids]
         num_frames = self._motion_num_frames[motion_ids]
         dt = self._motion_dt[motion_ids]
@@ -174,6 +199,17 @@ class MotionLibBase:
         frame_idx0, frame_idx1, blend = self._calc_frame_blend(motion_times, motion_len, num_frames, dt)
         f0l = frame_idx0 + self.length_starts[motion_ids]
         f1l = frame_idx1 + self.length_starts[motion_ids]
+
+        # Preserve the raw frame for Buffer metadata and for physical reset
+        # state. Guidance queries remap a Buffer interval to its first regular
+        # successor (the transition goal); physical queries deliberately keep
+        # the stored interpolated frames.
+        active_f0l = f0l
+        active_is_buffer = self._motion_is_buffer[active_f0l]
+        if use_buffer_target:
+            buffer_target = self._motion_buffer_targets[active_f0l]
+            f0l = torch.where(active_is_buffer, buffer_target, f0l)
+            f1l = torch.where(active_is_buffer, buffer_target, f1l)
 
         if "dof_pos" in self.__dict__:
             local_rot0 = self.dof_pos[f0l]
@@ -282,6 +318,10 @@ class MotionLibBase:
             contact = (1.0 - blend) * contact0 + blend * contact1
 
             return_dict["contact_mask"] = contact
+        # Buffer metadata is discrete scheduler state, not a physical signal:
+        # use the active reference frame (f0) rather than interpolating it.
+        return_dict["is_buffer"] = active_is_buffer.unsqueeze(-1)
+        return_dict["kappa"] = self._motion_kappas[active_f0l].unsqueeze(-1)
         return_dict.update(
             {
                 "root_pos": rg_pos[..., 0, :].clone(),
@@ -324,6 +364,9 @@ class MotionLibBase:
         has_action = False
         _motion_actions = []
         _motion_contact_masks = []
+        _motion_is_buffer = []
+        _motion_kappas = []
+        _motion_buffer_targets = []
 
         if flags.real_traj:
             self.q_gts, self.q_grs, self.q_gavs, self.q_gvs = [], [], [], []
@@ -354,6 +397,7 @@ class MotionLibBase:
 
         motion_data_list = self._motion_data_list[sample_idxes.cpu().numpy()]
         res_acc = self.load_motion_with_skeleton(motion_data_list, self.fix_height, target_heading, max_len)
+        motion_frame_offset = 0
         for f in track(range(len(res_acc)), description="Loading motions..."):
             motion_file_data, curr_motion = res_acc[f]
             motion_fps = curr_motion.fps
@@ -377,6 +421,12 @@ class MotionLibBase:
                 _motion_actions.append(curr_motion.action)
             if self.has_contact_mask:
                 _motion_contact_masks.append(curr_motion.contact_mask)
+            _motion_is_buffer.append(curr_motion.is_buffer)
+            _motion_kappas.append(curr_motion.kappa)
+            _motion_buffer_targets.append(
+                curr_motion.buffer_target_idx + motion_frame_offset
+            )
+            motion_frame_offset += num_frames
             if flags.real_traj:
                 self.q_gts.append(curr_motion.quest_motion["quest_trans"])
                 self.q_grs.append(curr_motion.quest_motion["quest_rot"])
@@ -397,6 +447,13 @@ class MotionLibBase:
             self._motion_actions = torch.cat(_motion_actions, dim=0).float().to(self._device)
         if self.has_contact_mask:
             self._motion_contact_masks = torch.cat(_motion_contact_masks, dim=0).float().to(self._device)
+        # Per-frame Skill Graph metadata is always available. Plain motions
+        # receive all-zero defaults, keeping legacy datasets compatible.
+        self._motion_is_buffer = torch.cat(_motion_is_buffer, dim=0).bool().to(self._device)
+        self._motion_kappas = torch.cat(_motion_kappas, dim=0).float().to(self._device)
+        self._motion_buffer_targets = torch.cat(
+            _motion_buffer_targets, dim=0
+        ).long().to(self._device)
         self._num_motions = len(motions)
 
         self.gts = torch.cat([m.global_translation for m in motions], dim=0).float().to(self._device)
@@ -484,6 +541,19 @@ class MotionLibBase:
                     self.has_contact_mask = "point"
                 else:
                     raise ValueError(f"Contact mask shape {contact_shape} is not supported")
+
+            is_buffer, kappa = prepare_buffer_metadata(
+                curr_file.get("is_buffer"), curr_file.get("kappa"), seq_len
+            )
+            target_indices = buffer_target_indices(is_buffer)
+            sliced_targets = target_indices[start:end]
+            if np.any(is_buffer[start:end] & (
+                (sliced_targets < start) | (sliced_targets >= end)
+            )):
+                raise ValueError(
+                    "motion_max_len cropped a Buffer segment away from its "
+                    "non-Buffer successor target"
+                )
             dt = 1 / curr_file["fps"]
 
             B, J, N = pose_aa.shape
@@ -514,6 +584,11 @@ class MotionLibBase:
                     curr_motion.action = to_torch(curr_file["action"]).clone()[start:end]
                 if self.has_contact_mask:
                     curr_motion.contact_mask = to_torch(curr_file["contact_mask"]).clone()[start:end]
+                curr_motion.is_buffer = torch.from_numpy(is_buffer[start:end].copy())
+                curr_motion.kappa = torch.from_numpy(kappa[start:end].copy())
+                curr_motion.buffer_target_idx = torch.from_numpy(
+                    (sliced_targets - start).copy()
+                ).long()
                 res[f] = (curr_file, curr_motion)
             else:
                 logger.error("No mesh parser found")
@@ -532,14 +607,66 @@ class MotionLibBase:
             return (self._motion_num_frames[motion_ids] * self._sim_fps / self._motion_fps).ceil().int()
 
     def sample_time(self, motion_ids, truncate_time=None):
-        n = len(motion_ids)
-        phase = torch.rand(motion_ids.shape, device=self._device)
-        motion_len = self._motion_lengths[motion_ids]
+        """Uniform RSI time sampling that never starts on a Buffer frame.
+
+        For ordinary motions this is identical to uniform continuous-time
+        sampling. Transition motions use rejection sampling against the raw
+        per-frame Buffer mask. A deterministic fallback guarantees the
+        contract even for trajectories dominated by Buffer frames.
+        """
+        motion_len = self._motion_lengths[motion_ids].clone()
         if truncate_time is not None:
             assert truncate_time >= 0.0
             motion_len -= truncate_time
+        if torch.any(motion_len < 0):
+            raise ValueError("truncate_time exceeds at least one motion length")
 
-        motion_time = phase * motion_len
+        motion_time = torch.rand(
+            motion_ids.shape, device=self._device) * motion_len
+        if not hasattr(self, "_motion_is_buffer"):
+            return motion_time.to(self._device)
+
+        flat_ids = motion_ids.reshape(-1)
+        flat_time = motion_time.reshape(-1)
+        flat_limit = motion_len.reshape(-1)
+
+        def buffer_mask_for(times):
+            frame0, _, _ = self._calc_frame_blend(
+                times, self._motion_lengths[flat_ids],
+                self._motion_num_frames[flat_ids], self._motion_dt[flat_ids])
+            global_frame0 = frame0 + self.length_starts[flat_ids]
+            return self._motion_is_buffer[global_frame0]
+
+        invalid = buffer_mask_for(flat_time)
+        for _ in range(32):
+            if not torch.any(invalid):
+                break
+            flat_time[invalid] = torch.rand(
+                int(invalid.sum().item()), device=self._device
+            ) * flat_limit[invalid]
+            invalid = buffer_mask_for(flat_time)
+
+        # This is practically unreachable for the generated trajectories,
+        # but makes the no-Buffer RSI guarantee independent of Buffer ratio.
+        for pos in torch.nonzero(invalid, as_tuple=False).flatten().tolist():
+            motion_id = int(flat_ids[pos].item())
+            start = int(self.length_starts[motion_id].item())
+            frames = int(self._motion_num_frames[motion_id].item())
+            dt = float(self._motion_dt[motion_id].item())
+            limit = float(flat_limit[pos].item())
+            local_mask = self._motion_is_buffer[start:start + frames]
+            local_frames = torch.arange(frames, device=self._device)
+            eligible = (~local_mask) & (local_frames * dt <= limit)
+            candidates = torch.nonzero(eligible, as_tuple=False).flatten()
+            if candidates.numel() == 0:
+                raise ValueError(
+                    f"motion {motion_id} has no non-Buffer RSI frame")
+            pick = candidates[torch.randint(
+                candidates.numel(), (1,), device=self._device)]
+            flat_time[pos] = pick.to(flat_time.dtype) * dt
+
+        if torch.any(buffer_mask_for(flat_time)):
+            raise RuntimeError("internal error: RSI sampled a Buffer frame")
         return motion_time.to(self._device)
 
     def get_motion_length(self, motion_ids=None):

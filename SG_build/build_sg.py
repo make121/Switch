@@ -83,7 +83,20 @@ def main():
     )
     parser.add_argument(
         "--max-trajectories", type=int, default=10,
-        help="Max trajectories to collect per skill pair (default: 10)",
+        help="Max trajectories per pair in legacy distance mode (default: 10)",
+    )
+    parser.add_argument(
+        "--transition-selection", choices=("distance", "phase"),
+        default="distance",
+        help="Transition selection: globally easiest or phase-stratified",
+    )
+    parser.add_argument(
+        "--phase-bins", type=int, default=16,
+        help="Source temporal bins per skill in phase mode (default: 16)",
+    )
+    parser.add_argument(
+        "--edges-per-bin", type=int, default=1,
+        help="Representative transitions per source bin and target skill",
     )
     parser.add_argument(
         "--fps", type=float, default=None, help="Override FPS for all motions"
@@ -141,6 +154,9 @@ def main():
         subsample_stride=args.subsample,
         exclude_boundary_frames=args.exclude_boundary,
         max_trajectories_per_pair=args.max_trajectories,
+        transition_selection=args.transition_selection,
+        phase_bins=args.phase_bins,
+        edges_per_phase_bin=args.edges_per_bin,
         fps=args.fps,
     )
 

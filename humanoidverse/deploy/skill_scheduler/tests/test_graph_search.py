@@ -67,7 +67,13 @@ def make_toy_graph() -> dict:
                  (5, 6), (6, 7), (7, 8), (8, 9)]:
         edges.append({"src": u, "dst": v, "weight": 1.0,
                       "is_cross_skill": False, "is_buffer": False})
-    edges.append({"src": 2, "dst": 7, "weight": 0.0,
+    # Raw direct macro for the Buffer chain below. It remains in the JSON for
+    # distance/cost calculation but is not exposed in runtime adjacency.
+    edges.append({"src": 3, "dst": 8, "weight": 0.0,
+                  "is_cross_skill": True, "is_buffer": False})
+    # Reverse direction has no Buffer coverage and therefore keeps its direct
+    # edge as the connectivity fallback.
+    edges.append({"src": 7, "dst": 2, "weight": 0.0,
                   "is_cross_skill": True, "is_buffer": False})
     edges.append({"src": 3, "dst": 10, "weight": 0.0,
                   "is_cross_skill": False, "is_buffer": True})
@@ -104,18 +110,16 @@ def test_value_function_hand_computed():
     V, next_hop = planner.build_value_function([9])
     # Hand-computed with lambda_sw=4, all d_uv=0. Note: node 4 is skill A's
     # LAST frame -- it has no outgoing edges and cannot reach T at all.
-    # V[8]=1, V[7]=2, V[6]=3, V[5]=4, V[10]=4+1=5,
-    # V[3]=4+5=9 via the buffer chain (temporal route dead-ends at node 4),
-    # V[2]=min(1+9, 4+2)=6 via cross edge to node 7,
-    # V[1]=7, V[0]=8.
-    expected_V = {9: 0, 8: 1, 7: 2, 6: 3, 5: 4, 10: 5, 3: 9, 2: 6,
-                  1: 7, 0: 8}
+    # Macro 3->8 costs lambda_sw=4 and expands into two Buffer hops costing
+    # 2 each. V[8]=1, V[10]=2+1=3, V[3]=2+3=5, then temporal costs.
+    expected_V = {9: 0, 8: 1, 7: 2, 6: 3, 5: 4, 10: 3, 3: 5,
+                  2: 6, 1: 7, 0: 8}
     assert V == expected_V, f"V mismatch: {V}"
     assert 4 not in V            # dead end: skill A's last frame
-    assert next_hop[2] == 7      # cross-skill edge wins for node 2
+    assert next_hop[2] == 3      # advance temporally to the Buffer entry
     assert next_hop[3] == 10     # node 3's only route is the buffer chain
     path = planner.reconstruct_path_gs(0, next_hop, {9})
-    assert path == [0, 1, 2, 7, 8, 9], f"path: {path}"
+    assert path == [0, 1, 2, 3, 10, 8, 9], f"path: {path}"
 
     # Cache: same T returns identical objects without recomputation.
     V2, nh2 = planner.build_value_function([9])
@@ -127,6 +131,39 @@ def test_value_function_hand_computed():
     assert planner.reconstruct_path_gs(5, nh0, {0}) is None
     assert np.isinf(planner.score(g.nodes[5], 5, V0, lambda_cost=1.0))
     print("PASS test_value_function_hand_computed")
+
+
+def test_buffer_macro_expansion_preserves_cost():
+    g = load_toy()
+    assert g.buffer_chains == {(3, 8): (10,)}
+    assert g.expanded_macro_edges == 1
+    assert g.macro_edge_costs[(3, 8)] == LAMBDA_SW
+    cross_edges = [(u, v) for u, outs in enumerate(g.adj)
+                   for v, _, et in outs if et == EDGE_CROSS]
+    assert cross_edges == [(7, 2)]
+
+    chain_weights = []
+    for u, v in [(3, 10), (10, 8)]:
+        weights = [w for nxt, w, et in g.adj[u]
+                   if nxt == v and et == EDGE_BUFFER]
+        assert len(weights) == 1
+        chain_weights.append(weights[0])
+    assert chain_weights == [LAMBDA_SW / 2, LAMBDA_SW / 2]
+    assert sum(chain_weights) == g.macro_edge_costs[(3, 8)]
+
+    # Without Buffer metadata, the raw macro remains a searchable direct edge.
+    raw = make_toy_graph()
+    raw["buffer_nodes"] = []
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(raw, f)
+        path = f.name
+    fallback = SkillGraphData.from_json(
+        path, sigma_q=1.0, sigma_qdot=1.0, sigma_p=1.0,
+        lambda_sw=LAMBDA_SW)
+    assert fallback.buffer_chains == {}
+    assert fallback.expanded_macro_edges == 0
+    assert any(v == 8 and et == EDGE_CROSS for v, _, et in fallback.adj[3])
+    print("PASS test_buffer_macro_expansion_preserves_cost")
 
 
 def test_entry_check_branches():
@@ -157,7 +194,7 @@ def test_entry_check_branches():
 def test_scheduler_step_flow():
     g = load_toy()
     # tau=1.0 so T spans all of skill B (reachable from skill A via the
-    # cross edge), letting the attach path traverse the switching edge.
+    # Buffer chain), letting the attach path traverse the switching edge.
     # enable_safety_replan=True to exercise the safety_event -> estop path
     # (it is OFF by default).
     sched = SkillGraphScheduler(g, planner_type="graph_search",
@@ -166,22 +203,31 @@ def test_scheduler_step_flow():
     x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
 
     # init: attaches at node 0 (nearest overall) and walks THROUGH the
-    # cross-skill edge 2->7 into skill B
+    # precomputed Buffer chain into skill B
     gd = sched.step(x, user_cmd="skill_B", t=0.0)
     assert gd is not None and gd.node_id == 0 and gd.kappa == 0
-    assert sched.current_path == [0, 1, 2, 7, 8, 9], sched.current_path
+    assert sched.current_path == [0, 1, 2, 3, 10, 8, 9], sched.current_path
+    assert any(g.is_buffer[n] for n in sched.current_path)
     # no trigger: same guidance returned
     assert sched.step(x, user_cmd="skill_B", t=0.02).node_id == 0
-    # cmd_change: re-plans onto skill_A (already inside T -> temporal walk)
+    # A command change is queued instead of attaching to an arbitrary target
+    # frame.  The current reference keeps running because no forward Buffer
+    # macro from skill B to skill A exists in this toy graph.
+    version = sched.path_version
     gd = sched.step(x, user_cmd="skill_A", t=0.04)
     assert gd.node_id == 0
-    assert sched.current_path == [0, 1, 2, 3, 4], sched.current_path
+    assert sched.pending_cmd == 0
+    assert sched.path_version == version
+    # Re-issuing the active command cancels the pending request, after which
+    # the independent safety-event behaviour can be tested.
+    assert sched.step(x, user_cmd="skill_B", t=0.05).node_id == 0
+    assert sched.pending_cmd is None
     # safety_event: huge deviation latches e-stop, guidance stops
     x_far = NodeState(q=np.full(23, 10.0), q_dot=np.zeros(23),
                       p_hat=np.zeros(3))
-    assert sched.step(x_far, user_cmd="skill_A", t=0.06) is None
+    assert sched.step(x_far, user_cmd="skill_B", t=0.06) is None
     assert sched.estopped
-    assert sched.step(x, user_cmd="skill_A", t=0.08) is None  # stays latched
+    assert sched.step(x, user_cmd="skill_B", t=0.08) is None  # stays latched
     print("PASS test_scheduler_step_flow")
 
 
@@ -308,10 +354,9 @@ def test_attach_path_crosses_skills():
     sched = SkillGraphScheduler(g, planner_type="graph_search",
                                 A=1.889, B=5.0, lambda_cost=1.0,
                                 tau=0.2, top_k=5)
-    entry_gid = 100  # skill 0, frame 100
+    entry_gid = 50  # reachable skill-0 frame before a Buffer-chain source
     x = g.nodes[entry_gid]
-    sched.set_command(1)
-    gd = sched.step(x, user_cmd=None, t=0.0)  # init trigger
+    gd = sched.step(x, user_cmd=1, t=0.0)  # init trigger
     assert gd is not None, "scheduler e-stopped on an exact graph state"
     path = sched.current_path
     T_set = set(sched.T_cmd)
@@ -331,8 +376,7 @@ def test_attach_path_crosses_skills():
 
 
 def test_cmd_change_estop_fallback():
-    """A commanded switch must never deadlock on entry estop: cmd_change
-    downgrades estop -> search and still installs a path."""
+    """A far command entry must wait; it must never jump or reset."""
     g = load_toy()
     sched = SkillGraphScheduler(g, planner_type="graph_search",
                                 A=0.5, B=2.0, lambda_cost=1.0,
@@ -340,15 +384,95 @@ def test_cmd_change_estop_fallback():
     x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
     assert sched.step(x, user_cmd="skill_B", t=0.0) is not None
 
-    # Robot far from every graph node, then a command arrives: estop at
-    # entry check must be downgraded, not latched.
+    # Put the active reference on skill B and request skill A.  There is no
+    # buffered B->A macro, so the command remains pending regardless of the
+    # live-state distance.
     x_far = NodeState(q=np.full(23, 10.0), q_dot=np.zeros(23),
                       p_hat=np.zeros(3))
+    version = sched.path_version
     gd = sched.step(x_far, user_cmd="skill_A", t=1.0)
-    assert gd is not None, "cmd_change estop should fall back to search"
+    assert gd is not None
     assert not sched.estopped
-    assert sched.current_path  # some path installed
-    print("PASS test_cmd_change_estop_fallback")
+    assert sched.pending_cmd == 0
+    assert sched.path_version == version
+    print("PASS test_cmd_change_waits_without_buffer")
+
+
+def test_cmd_change_waits_for_forward_buffer_source():
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="graph_search",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    sched.set_command("skill_A")
+    sched.install_reference_path(sched.pure_skill_path(0), t=0.0)
+    version = sched.path_version
+    x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
+
+    # Command at frame 1: keep frames 1->2->3; node 3 is the earliest future
+    # source of the buffered 3->8 macro.
+    sched.pointer = 1
+    assert sched.step(x, user_cmd="skill_B", t=0.02).node_id == 1
+    assert sched.pending_cmd == 1 and sched.pending_source == 3
+    assert sched.path_version == version
+    sched.pointer = 2
+    assert sched.step(x, user_cmd="skill_B", t=0.04).node_id == 2
+    assert sched.path_version == version
+
+    # Only at the exact source, with entry error <= A, install the Buffer
+    # chain.  The path can neither start in Buffer node 10 nor target frame 8.
+    sched.pointer = 3
+    gd = sched.step(x, user_cmd="skill_B", t=0.06)
+    assert gd.node_id == 3
+    assert sched.current_path == [3, 10, 8, 9]
+    assert sched.current_cmd == 1 and sched.pending_cmd is None
+    assert sched.last_trigger == "cmd_change"
+    assert sched.path_version == version + 1
+    print("PASS test_cmd_change_waits_for_forward_buffer_source")
+
+
+def test_cmd_change_rejects_bad_live_entry():
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="graph_search",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    sched.set_command("skill_A")
+    sched.install_reference_path(sched.pure_skill_path(0), t=0.0)
+    sched.pointer = 3
+    version = sched.path_version
+    x_bad = NodeState(q=np.full(23, 0.05), q_dot=np.zeros(23),
+                      p_hat=np.zeros(3))  # sim=1.15 > A
+    gd = sched.step(x_bad, user_cmd="skill_B", t=0.02)
+    assert gd.node_id == 3
+    assert sched.current_cmd == 0 and sched.pending_cmd == 1
+    assert sched.path_version == version
+    assert sched.last_trigger == "cmd_wait_entry_error"
+    print("PASS test_cmd_change_rejects_bad_live_entry")
+
+
+def test_cmd_change_uses_separate_live_entry_threshold():
+    """A time-aligned Buffer entry may tolerate ordinary tracking error
+    without weakening the graph-wide attachment threshold A."""
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="graph_search",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3,
+                                switch_entry_A=1.5)
+    sched.set_command("skill_A")
+    sched.install_reference_path(sched.pure_skill_path(0), t=0.0)
+    sched.pointer = 3
+    version = sched.path_version
+    x_tracking_error = NodeState(
+        q=np.full(23, 0.05), q_dot=np.zeros(23), p_hat=np.zeros(3))
+
+    gd = sched.step(x_tracking_error, user_cmd="skill_B", t=0.02)
+    assert gd.node_id == 3
+    assert sched.last_best_sim > sched.A
+    assert sched.last_best_sim <= sched.switch_entry_A
+    assert sched.current_path == [3, 10, 8, 9]
+    assert sched.current_cmd == 1 and sched.pending_cmd is None
+    assert sched.path_version == version + 1
+    assert sched.last_trigger == "cmd_change"
+    print("PASS test_cmd_change_uses_separate_live_entry_threshold")
 
 
 def test_nn_planner_direct_hop():
@@ -405,11 +529,15 @@ def test_nn_planner_unsafe_jump():
 
 def main():
     test_deploy_edge_weight()
+    test_buffer_macro_expansion_preserves_cost()
     test_value_function_hand_computed()
     test_entry_check_branches()
     test_scheduler_step_flow()
     test_safety_replan_disabled_by_default()
     test_cmd_change_estop_fallback()
+    test_cmd_change_waits_for_forward_buffer_source()
+    test_cmd_change_rejects_bad_live_entry()
+    test_cmd_change_uses_separate_live_entry_threshold()
     test_nn_planner_direct_hop()
     test_nn_planner_runtime_buffers()
     test_nn_planner_unsafe_jump()
