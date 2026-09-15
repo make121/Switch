@@ -228,10 +228,22 @@ class SkillGraphData:
         return start, start + self.skill_lengths[skill_id]
 
     def target_set(self, skill_id: int, tau: float) -> List[int]:
-        """T_cmd: the first tau fraction of the skill's frames (spec 3)."""
+        """Command targets: opening frames plus trained Buffer landings.
+
+        A Buffer macro may deliberately land after the opening ``tau``
+        fraction of a skill.  Its destination is still a valid trained entry
+        and must therefore be a graph-search goal; otherwise the expanded
+        Buffer chain can appear unreachable and Dijkstra may detour through a
+        third skill merely to reach the opening window.
+        """
         start, end = self.skill_range(skill_id)
         n = max(1, int(round((end - start) * tau)))
-        return list(range(start, start + n))
+        targets = set(range(start, start + n))
+        targets.update(
+            dst for (_, dst) in self.buffer_chains
+            if int(self.skill_ids[dst]) == skill_id
+        )
+        return sorted(targets)
 
     def temporal_successor(self, node_id: int) -> Optional[int]:
         """The unique same-skill forward neighbor, or None at a skill end."""

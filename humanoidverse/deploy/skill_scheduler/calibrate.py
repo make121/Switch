@@ -167,6 +167,9 @@ def main():
         # Grid-search starting points (spec 6.2); not yet calibrated.
         "A_candidates": [round(A_candidate, 4)],
         "B_candidates": [round(B_p75, 4), round(B_p90, 4)],
+        # Live error allowed at a time-aligned, trained Buffer source. Keep
+        # it below the emergency boundary B.
+        "switch_entry_A": round(min(11.0, B_p90), 4),
         "tau": [0.1, 0.2, 0.3],
         "top_k": [3, 5, 10],
         "lambda_sw": [1.0, 5.0, 10.0],

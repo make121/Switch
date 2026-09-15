@@ -240,8 +240,28 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
     def _update_reset_buf(self):
         super()._update_reset_buf()
 
+        # Policy guidance deliberately points every Buffer frame at the
+        # transition endpoint.  Termination, however, must follow the stored
+        # physical interpolation; comparing the source-side robot directly
+        # with the endpoint can trip body_z on every step, reset back to the
+        # first Buffer frame, and permanently freeze kappa.  These fields are
+        # populated alongside the observations below and equal the ordinary
+        # guidance differences outside Buffer intervals.
+        termination_global_body_pos = getattr(
+            self, "termination_dif_global_body_pos",
+            self.dif_global_body_pos)
+        termination_local_body_pos = getattr(
+            self, "termination_dif_local_body_pos",
+            self.dif_local_body_pos)
+        termination_anchor_pos_z = getattr(
+            self, "termination_dif_anchor_pos_z",
+            self.dif_anchor_pos_z)
+        termination_anchor_ori = getattr(
+            self, "termination_dif_anchor_ori",
+            self.dif_anchor_ori)
+
         if self.config.termination.terminate_when_motion_far:
-            self.diff_body_pos = self.dif_global_body_pos
+            self.diff_body_pos = termination_global_body_pos
             reset_buf_motion_far = torch.any(
                 torch.norm(self.diff_body_pos, dim=-1) > self.terminate_when_motion_far_threshold,
                 dim=-1,
@@ -255,17 +275,24 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
 
         if "terminate_by_ref_pos_z" in self.config.termination and self.config.termination.terminate_by_ref_pos_z:
             thr = getattr(self.config.termination_scales, "terminate_by_ref_pos_z_threshold", 0.25)
-            self.reset_buf_terminate_by["ref_pos_z"] = torch.abs(self.dif_anchor_pos_z) > thr
+            self.reset_buf_terminate_by["ref_pos_z"] = torch.abs(
+                termination_anchor_pos_z) > thr
             self.reset_buf |= self.reset_buf_terminate_by["ref_pos_z"]
 
         if "terminate_by_ref_ori" in self.config.termination and self.config.termination.terminate_by_ref_ori:
             thr = getattr(self.config.termination_scales, "terminate_by_ref_ori_threshold", 0.8)
-            self.reset_buf_terminate_by["ref_ori"] = self.dif_anchor_ori.abs() > thr
+            self.reset_buf_terminate_by["ref_ori"] = \
+                termination_anchor_ori.abs() > thr
             self.reset_buf |= self.reset_buf_terminate_by["ref_ori"]
 
         if "terminate_by_body_z" in self.config.termination and self.config.termination.terminate_by_body_z:
             thr = getattr(self.config.termination_scales, "terminate_by_body_z_threshold", 0.25)
-            self.reset_buf_terminate_by["body_z"] = torch.any(self.dif_local_body_pos[:, [4, 10, 24, 25, 26], -1].abs() > thr, dim=-1)
+            self.reset_buf_terminate_by["body_z"] = torch.any(
+                termination_local_body_pos[
+                    :, [4, 10, 24, 25, 26], -1
+                ].abs() > thr,
+                dim=-1,
+            )
             self.reset_buf |= self.reset_buf_terminate_by["body_z"]
 
     def _update_timeout_buf(self):
@@ -827,6 +854,80 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
             quat_rotate_inverse(ref_body_rot_extend[:, self.anchor_index, :], self.gravity_vec)[:, 2]
             - quat_rotate_inverse(self._rigid_body_rot_extend[:, self.anchor_index, :], self.gravity_vec)[:, 2]
         )
+
+        # Keep the endpoint as the policy target, but use the stored Buffer
+        # interpolation as the safety/termination reference.  This mirrors
+        # get_physical_state() used by physical reset initialization; RSI
+        # currently excludes Buffer frames.
+        self.termination_dif_global_body_pos = self.dif_global_body_pos
+        self.termination_dif_local_body_pos = self.dif_local_body_pos
+        self.termination_dif_anchor_pos_z = self.dif_anchor_pos_z
+        self.termination_dif_anchor_ori = self.dif_anchor_ori
+        buffer_envs = self.ref_is_buffer.view(-1).bool()
+        if torch.any(buffer_envs):
+            buffer_ids = torch.nonzero(
+                buffer_envs, as_tuple=False).flatten()
+            physical_res = self._motion_lib.get_physical_state(
+                self.motion_ids[buffer_ids], motion_times[buffer_ids],
+                offset=offset[buffer_ids])
+            physical_body_pos = physical_res["rg_pos_t"]
+            physical_body_rot = physical_res["rg_rot_t"]
+            robot_body_pos = self._rigid_body_pos_extend[buffer_ids]
+            robot_body_rot = self._rigid_body_rot_extend[buffer_ids]
+
+            termination_global = self.dif_global_body_pos.clone()
+            physical_global_diff = physical_body_pos - robot_body_pos
+            termination_global[buffer_ids] = physical_global_diff
+
+            physical_anchor_pos = physical_body_pos[:, self.anchor_index, :]
+            physical_anchor_rot = physical_body_rot[:, self.anchor_index, :]
+            robot_anchor_pos = robot_body_pos[:, self.anchor_index, :]
+            robot_anchor_rot = robot_body_rot[:, self.anchor_index, :]
+            body_count = robot_body_pos.shape[1]
+            physical_anchor_pos_repeat = physical_anchor_pos[:, None, :].repeat(
+                1, body_count, 1)
+            robot_anchor_pos_repeat = robot_anchor_pos[:, None, :].repeat(
+                1, body_count, 1)
+            robot_anchor_rot_repeat = robot_anchor_rot[:, None, :].repeat(
+                1, body_count, 1)
+            physical_anchor_rot_repeat = physical_anchor_rot[:, None, :].repeat(
+                1, body_count, 1)
+            physical_delta_pos = robot_anchor_pos_repeat.clone()
+            physical_delta_pos[..., 2] = physical_anchor_pos_repeat[..., 2]
+            physical_delta_ori = yaw_quat(
+                quat_mul(
+                    robot_anchor_rot_repeat,
+                    quat_inverse(physical_anchor_rot_repeat, w_last=True),
+                    w_last=True,
+                ),
+                w_last=True,
+            )
+            physical_body_relative = physical_delta_pos + quat_apply(
+                physical_delta_ori,
+                physical_body_pos - physical_anchor_pos_repeat,
+            )
+            termination_local = self.dif_local_body_pos.clone()
+            physical_local_diff = physical_body_relative - robot_body_pos
+            termination_local[buffer_ids] = physical_local_diff
+
+            termination_anchor_z = self.dif_anchor_pos_z.clone()
+            physical_anchor_z = (
+                physical_anchor_pos[:, -1]
+                - robot_body_pos[:, self.anchor_index, -1]
+            )
+            termination_anchor_z[buffer_ids] = physical_anchor_z
+            termination_anchor_ori = self.dif_anchor_ori.clone()
+            buffer_gravity = self.gravity_vec[buffer_ids]
+            physical_ori_diff = (
+                quat_rotate_inverse(physical_anchor_rot, buffer_gravity)[:, 2]
+                - quat_rotate_inverse(robot_anchor_rot, buffer_gravity)[:, 2]
+            )
+            termination_anchor_ori[buffer_ids] = physical_ori_diff
+
+            self.termination_dif_global_body_pos = termination_global
+            self.termination_dif_local_body_pos = termination_local
+            self.termination_dif_anchor_pos_z = termination_anchor_z
+            self.termination_dif_anchor_ori = termination_anchor_ori
 
         self._log_motion_tracking_info()
 

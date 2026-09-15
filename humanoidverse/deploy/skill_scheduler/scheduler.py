@@ -46,12 +46,16 @@ class SkillGraphScheduler:
         # A is calibrated for graph attachment/search.  A live policy does
         # not sit exactly on its reference node, so applying that same tight
         # threshold at a time-aligned Buffer source can reject every switch.
-        # Keep a separate threshold for that one operation; defaulting to A
-        # preserves the old behaviour for callers that do not opt in.
+        # Keep a separate, moderately tolerant threshold for that operation.
+        # It remains bounded by B so accepting a switch can never bypass the
+        # scheduler's emergency-distance boundary.
         self.switch_entry_A = (
-            float(A) if switch_entry_A is None else float(switch_entry_A))
+            min(11.0, float(B)) if switch_entry_A is None
+            else float(switch_entry_A))
         if self.switch_entry_A <= 0:
             raise ValueError("switch_entry_A must be positive")
+        if self.switch_entry_A > float(B):
+            raise ValueError("switch_entry_A must be <= B")
         self.lambda_cost = lambda_cost
         self.tau = tau
         self.top_k = top_k
@@ -337,6 +341,19 @@ class SkillGraphScheduler:
             return None
         return self.guidance_seq[self.pointer]
 
+    def transition_active(self) -> bool:
+        """Whether the installed path has not landed in its target skill.
+
+        ``current_cmd`` is changed when a transition path is installed, but
+        that path starts at the old skill and then traverses Buffer nodes.
+        Until its current node belongs to ``current_cmd``, replacing the path
+        would restart the reference clock and visually resemble a reset.
+        """
+        guidance = self.current_guidance()
+        if guidance is None or self.current_cmd is None:
+            return False
+        return int(self.graph.skill_ids[guidance.node_id]) != self.current_cmd
+
     def advance(self) -> Optional[Guidance]:
         """Advance the reference by one frame (called once per control step
         by the deployment loop)."""
@@ -358,14 +375,22 @@ class SkillGraphScheduler:
         # Graph-search command changes are deferred to a future Buffer macro
         # source.  Initialisation and the NN planner retain their established
         # immediate planning behaviour.
-        if user_cmd is not None and self.current_cmd is not None \
-                and self.guidance_seq and self.planner_type == "graph_search":
-            requested = self.graph.skill_index(user_cmd)
-            if requested != self.current_cmd:
-                self._queue_command(requested)
-            elif self.pending_cmd is not None:
-                self._clear_pending_command()
+        if self.current_cmd is not None and self.guidance_seq \
+                and self.planner_type == "graph_search":
+            if user_cmd is not None:
+                requested = self.graph.skill_index(user_cmd)
+                if requested != self.current_cmd:
+                    self._queue_command(requested)
+                elif self.pending_cmd is not None:
+                    self._clear_pending_command()
             if self.pending_cmd is not None:
+                # A command arriving during an installed transition is
+                # queued.  Do not search from its old-skill/Buffer prefix and
+                # do not hot-swap the reference.  Process it once the current
+                # path first lands in the command's target skill.
+                if self.transition_active():
+                    self.last_trigger = "cmd_queued_during_transition"
+                    return self.current_guidance()
                 return self._step_pending_command(x, t)
 
         trigger = None

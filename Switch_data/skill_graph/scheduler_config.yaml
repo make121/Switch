@@ -9,6 +9,7 @@ A_candidates:
 B_candidates:
 - 11.775
 - 14.4499
+switch_entry_A: 11.0
 tau:
 - 0.1
 - 0.2

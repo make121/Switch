@@ -78,6 +78,8 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         )
         A = float(getattr(cfg, "A", sg_cfg["A_candidates"][0]))
         B = float(getattr(cfg, "B", sg_cfg["B_candidates"][-1]))
+        default_switch_entry_A = float(
+            sg_cfg.get("switch_entry_A", min(11.0, B)))
         self.scheduler = SkillGraphScheduler(
             self.graph,
             planner_type=str(getattr(cfg, "planner_type", "graph_search")),
@@ -88,7 +90,8 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             grace_s=float(getattr(cfg, "grace_s", 1.0)),
             candidate_pool=str(getattr(cfg, "candidate_pool", "all")),
             enable_safety_replan=bool(getattr(cfg, "enable_safety_replan", False)),
-            switch_entry_A=float(getattr(cfg, "switch_entry_A", A)),
+            switch_entry_A=float(getattr(
+                cfg, "switch_entry_A", default_switch_entry_A)),
         )
         self.ref_builder = ReferenceBuilder.from_pkl_files(
             self.graph, list(cfg.skill_pkl_files))
@@ -262,6 +265,11 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
 
         env = self.env
         user_cmd = getattr(env, "requested_skill_id", None)
+        # Keyboard requests are edge-triggered events. Keeping the value on
+        # the env made the same command appear on every subsequent frame and
+        # obscured whether a queued switch had actually been consumed.
+        if hasattr(env, "requested_skill_id"):
+            env.requested_skill_id = None
         if self._auto_interval > 0 and self._auto_skills \
                 and env.common_step_counter > 0 \
                 and env.common_step_counter % self._auto_interval == 0:
@@ -285,7 +293,10 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         #     without our own injection. The env has already reset against
         #     the installed reference, so rewind scheduler state only.
         ep_len = int(env.episode_length_buf[0])
-        natural_reset = (
+        previous_dones = actor_state.get("dones")
+        previous_done = previous_dones is not None \
+            and bool(previous_dones[0])
+        natural_reset = previous_done or (
             self._prev_ep_len is not None
             and ep_len < self._prev_ep_len
             and not self._just_injected
@@ -343,7 +354,12 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         if pending_state != getattr(self, "_last_pending_state", None):
             self._last_pending_state = pending_state
             if pending is not None:
-                if pending_source is None:
+                if self.scheduler.transition_active():
+                    logger.info(
+                        f"Pending switch -> {self.graph.skill_names[pending]}: "
+                        f"queued until the current transition lands in "
+                        f"{self.graph.skill_names[self.scheduler.current_cmd]}")
+                elif pending_source is None:
                     logger.info(
                         f"Pending switch -> {self.graph.skill_names[pending]}: "
                         f"waiting for a future Buffer macro source")

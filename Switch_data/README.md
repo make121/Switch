@@ -69,6 +69,23 @@ transitions. `scheduler_config.yaml` contains graph-derived normalization and
 A/B grid-search candidates calibrated with `w_p=0`; these candidates still
 need policy evaluation before they are treated as final thresholds.
 
+For online graph search, the target set is the union of the skill's opening
+window and every trained Buffer landing in that skill. This lets a Buffer
+that lands in the middle of a motion terminate the macro directly instead of
+forcing a detour through another skill. A new command received while a
+transition is active is queued until the current Buffer path lands in its
+original target skill; it does not hot-swap and restart the reference clock.
+The default live Buffer-entry threshold is `switch_entry_A: 11.0` and must
+not exceed `B`.
+
+Buffer frames intentionally use the transition endpoint for policy guidance
+and reward computation, while reference-relative termination checks use the
+stored interpolated physical frame. Physical reset initialization also uses
+the stored trajectory state; RSI currently excludes Buffer frames. Keeping
+these references separate prevents a large source-to-endpoint body-height
+difference from resetting an environment back to the first Buffer frame
+indefinitely.
+
 Every cross-skill edge uses an edge-local SE(2) transform: the destination
 entry frame is anchored to the source frame's x-y position and yaw before
 Buffer interpolation. Relative destination motion is preserved, including

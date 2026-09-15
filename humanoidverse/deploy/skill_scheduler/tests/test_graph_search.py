@@ -29,6 +29,8 @@ from humanoidverse.deploy.skill_scheduler.scheduler import SkillGraphScheduler
 
 REAL_GRAPH = _repo_root / "SG_build" / "sg_output_V2" / "skill_graph.json"
 REAL_CONFIG = _repo_root / "SG_build" / "sg_output_V2" / "scheduler_config.yaml"
+SWITCH_GRAPH = _repo_root / "Switch_data" / "skill_graph" / "skill_graph.json"
+SWITCH_CONFIG = _repo_root / "Switch_data" / "skill_graph" / "scheduler_config.yaml"
 
 LAMBDA_SW = 4.0
 
@@ -172,7 +174,8 @@ def test_entry_check_branches():
                                 A=0.5, B=2.0, lambda_cost=1.0,
                                 tau=0.2, top_k=3)
     sched.set_command("skill_B")
-    assert sched.T_cmd == [5]  # first tau=0.2 fraction of skill B = 1 frame
+    # Opening frame plus the trained 3->8 Buffer landing.
+    assert sched.T_cmd == [5, 8]
 
     # candidate_pool="all" (default): best node can be ANY graph node
     x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
@@ -261,6 +264,47 @@ def _load_real_graph() -> SkillGraphData:
     return SkillGraphData.from_json(
         str(REAL_GRAPH), sigma_q=cfg["sigma_q"], sigma_qdot=cfg["sigma_qdot"],
         sigma_p=cfg["sigma_p"], lambda_sw=5.0)
+
+
+def _load_switch_graph() -> SkillGraphData:
+    import yaml
+    with open(SWITCH_CONFIG) as f:
+        cfg = yaml.safe_load(f)
+    return SkillGraphData.from_json(
+        str(SWITCH_GRAPH), sigma_q=cfg["sigma_q"],
+        sigma_qdot=cfg["sigma_qdot"], sigma_p=cfg["sigma_p"],
+        lambda_sw=cfg["lambda_sw"][1], w_q=cfg.get("w_q", 1.0),
+        w_qdot=cfg.get("w_qdot", 1.0), w_p=cfg.get("w_p", 1.0))
+
+
+def test_switch_graph_mid_skill_buffer_is_direct_target():
+    """Regression: skill0/frame105 -> skill1/frame72 must not detour via 2."""
+    if not SWITCH_GRAPH.exists() or not SWITCH_CONFIG.exists():
+        print("SKIP test_switch_graph_mid_skill_buffer_is_direct_target "
+              "(Switch_data artifacts missing)")
+        return
+    g = _load_switch_graph()
+    source = next(
+        nid for nid in range(g.num_nodes)
+        if int(g.skill_ids[nid]) == 0 and int(g.frame_idxs[nid]) == 105)
+    targets = g.target_set(1, tau=0.2)
+    landing = next(
+        dst for src, dst in g.buffer_chains
+        if src == source and int(g.skill_ids[dst]) == 1)
+    assert landing in targets
+
+    sched = SkillGraphScheduler(
+        g, planner_type="graph_search", A=6.6014, B=14.4499,
+        lambda_cost=1.0, tau=0.2, top_k=5, switch_entry_A=11.0)
+    path = sched._buffer_path_from_source(source, targets)
+    assert path is not None
+    non_buffer_skills = {
+        int(g.skill_ids[nid]) for nid in path if not g.is_buffer[nid]
+    }
+    assert non_buffer_skills == {0, 1}, non_buffer_skills
+    assert path[0] == source and landing in path
+    print("PASS test_switch_graph_mid_skill_buffer_is_direct_target "
+          f"(source {source}, landing {landing}, path len {len(path)})")
 
 
 def test_real_graph_paths():
@@ -415,13 +459,15 @@ def test_cmd_change_waits_for_forward_buffer_source():
     assert sched.pending_cmd == 1 and sched.pending_source == 3
     assert sched.path_version == version
     sched.pointer = 2
-    assert sched.step(x, user_cmd="skill_B", t=0.04).node_id == 2
+    # A one-shot keyboard/automatic command remains pending; callers do not
+    # need to resend it on every control step.
+    assert sched.step(x, user_cmd=None, t=0.04).node_id == 2
     assert sched.path_version == version
 
     # Only at the exact source, with entry error <= A, install the Buffer
     # chain.  The path can neither start in Buffer node 10 nor target frame 8.
     sched.pointer = 3
-    gd = sched.step(x, user_cmd="skill_B", t=0.06)
+    gd = sched.step(x, user_cmd=None, t=0.06)
     assert gd.node_id == 3
     assert sched.current_path == [3, 10, 8, 9]
     assert sched.current_cmd == 1 and sched.pending_cmd is None
@@ -434,7 +480,8 @@ def test_cmd_change_rejects_bad_live_entry():
     g = load_toy()
     sched = SkillGraphScheduler(g, planner_type="graph_search",
                                 A=0.5, B=2.0, lambda_cost=1.0,
-                                tau=1.0, top_k=3)
+                                tau=1.0, top_k=3,
+                                switch_entry_A=0.5)
     sched.set_command("skill_A")
     sched.install_reference_path(sched.pure_skill_path(0), t=0.0)
     sched.pointer = 3
@@ -447,6 +494,60 @@ def test_cmd_change_rejects_bad_live_entry():
     assert sched.path_version == version
     assert sched.last_trigger == "cmd_wait_entry_error"
     print("PASS test_cmd_change_rejects_bad_live_entry")
+
+
+def test_command_during_transition_is_queued():
+    """A second command must not replace an in-flight Buffer reference."""
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="graph_search",
+                                A=0.5, B=2.0, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    sched.set_command("skill_A")
+    sched.install_reference_path(sched.pure_skill_path(0), t=0.0)
+    x = NodeState(q=np.zeros(23), q_dot=np.zeros(23), p_hat=np.zeros(3))
+
+    sched.pointer = 3
+    sched.step(x, user_cmd="skill_B", t=0.02)
+    assert sched.current_path == [3, 10, 8, 9]
+    version = sched.path_version
+    assert sched.transition_active()
+
+    # Request A while still at the old-skill prefix, then cross the Buffer.
+    gd = sched.step(x, user_cmd="skill_A", t=0.04)
+    assert gd.node_id == 3 and sched.pending_cmd == 0
+    assert sched.path_version == version
+    sched.pointer = 1
+    assert sched.step(x, user_cmd=None, t=0.06).node_id == 10
+    assert sched.path_version == version and sched.pending_cmd == 0
+
+    # The request becomes eligible only after landing in B. The toy graph
+    # has no trained B->A Buffer, so it stays pending without a hot-swap.
+    sched.pointer = 2
+    assert not sched.transition_active()
+    assert sched.step(x, user_cmd=None, t=0.08).node_id == 8
+    assert sched.path_version == version and sched.pending_cmd == 0
+    print("PASS test_command_during_transition_is_queued")
+
+
+def test_default_switch_entry_threshold():
+    g = load_toy()
+    sched = SkillGraphScheduler(g, planner_type="graph_search",
+                                A=0.5, B=14.4499, lambda_cost=1.0,
+                                tau=1.0, top_k=3)
+    assert sched.switch_entry_A == 11.0
+    clipped = SkillGraphScheduler(g, planner_type="graph_search",
+                                  A=0.5, B=2.0, lambda_cost=1.0,
+                                  tau=1.0, top_k=3)
+    assert clipped.switch_entry_A == 2.0
+    try:
+        SkillGraphScheduler(g, planner_type="graph_search",
+                            A=0.5, B=2.0, lambda_cost=1.0,
+                            tau=1.0, top_k=3, switch_entry_A=3.0)
+    except ValueError as exc:
+        assert "<= B" in str(exc)
+    else:
+        raise AssertionError("switch_entry_A > B must be rejected")
+    print("PASS test_default_switch_entry_threshold")
 
 
 def test_cmd_change_uses_separate_live_entry_threshold():
@@ -537,10 +638,13 @@ def main():
     test_cmd_change_estop_fallback()
     test_cmd_change_waits_for_forward_buffer_source()
     test_cmd_change_rejects_bad_live_entry()
+    test_command_during_transition_is_queued()
+    test_default_switch_entry_threshold()
     test_cmd_change_uses_separate_live_entry_threshold()
     test_nn_planner_direct_hop()
     test_nn_planner_runtime_buffers()
     test_nn_planner_unsafe_jump()
+    test_switch_graph_mid_skill_buffer_is_direct_target()
     test_real_graph_paths()
     test_kappa_passthrough()
     test_extend_to_skill_end()
