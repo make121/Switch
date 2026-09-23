@@ -19,18 +19,23 @@ recovery:
     - id: cmu_140_01
       source: recovery/source/140_01_poses.npz
       retargeted: recovery/retargeted/140_01_poses_retarget.pkl
+      contact_refined: recovery/retargeted_contact_refined/140_01_poses_retarget.pkl
     - id: cmu_140_02
       source: recovery/source/140_02_poses.npz
       retargeted: recovery/retargeted/140_02_poses_retarget.pkl
+      contact_refined: recovery/retargeted_contact_refined/140_02_poses_retarget.pkl
     - id: cmu_140_04
       source: recovery/source/140_04_poses.npz
       retargeted: recovery/retargeted/140_04_poses_retarget.pkl
+      contact_refined: recovery/retargeted_contact_refined/140_04_poses_retarget.pkl
     - id: cmu_140_08
       source: recovery/source/140_08_poses.npz
       retargeted: recovery/retargeted/140_08_poses_retarget.pkl
+      contact_refined: recovery/retargeted_contact_refined/140_08_poses_retarget.pkl
     - id: cmu_140_09
       source: recovery/source/140_09_poses.npz
       retargeted: recovery/retargeted/140_09_poses_retarget.pkl
+      contact_refined: recovery/retargeted_contact_refined/140_09_poses_retarget.pkl
 
 skill_graph:
   scope: skills_only
@@ -66,3 +71,70 @@ skill_graph:
     cross_skill_macro_edges: 96
     buffer_chain_edges: 1534
     transition_trajectories: 96
+
+unified_graph:
+  scope: task_and_recovery_directed
+  builder: ../SG_build/build_sg.py
+  roles:
+    task:
+      - cmu_141_12
+      - cmu_141_14
+      - cmu_141_19
+    recovery:
+      - cmu_140_01
+      - cmu_140_02
+      - cmu_140_04
+      - cmu_140_08
+      - cmu_140_09
+  allowed_cross_role_edges:
+    - task_to_task
+    - recovery_to_task
+  forbidden_cross_role_edges:
+    - task_to_recovery
+    - recovery_to_recovery
+  parameters:
+    threshold: 30.0
+    topk: 5
+    buffer_base: 1.0
+    max_buffer: 30
+    subsample: 3
+    exclude_boundary: 10
+    transition_selection: phase
+    phase_bins: 16
+    edges_per_bin: 1
+    recovery_exit_fraction: 0.2
+    task_entry_fraction: 0.2
+    recovery_edges_per_task: 3
+  sampling_ratios:
+    task_skill: 0.40
+    recovery_skill: 0.35
+    task_transition: 0.15
+    recovery_transition: 0.10
+  artifacts:
+    graph: unified_graph/skill_graph.json
+    transitions: unified_graph/augmented_motions.pkl
+    training_data: unified_graph/merged_training.pkl
+  summary:
+    original_nodes: 2318
+    buffer_nodes: 1930
+    temporal_edges: 2310
+    task_to_task_macro_edges: 96
+    recovery_to_task_macro_edges: 45
+    transition_trajectories: 141
+
+unified_graph_contact_refined:
+  status: current
+  source: unified_graph
+  recovery_variant: recovery/retargeted_contact_refined
+  checksum_file: CHECKSUMS.sha256
+  artifacts:
+    graph: unified_graph_contact_refined/skill_graph.json
+    transitions: unified_graph_contact_refined/augmented_motions.pkl
+    training_data: unified_graph_contact_refined/merged_training.pkl
+  summary:
+    original_nodes: 2313
+    buffer_nodes: 1995
+    temporal_edges: 2305
+    task_to_task_macro_edges: 96
+    recovery_to_task_macro_edges: 45
+    transition_trajectories: 141
