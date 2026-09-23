@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - /rewards/motion_tracking/general_main
+  - _self_
+
+# Isolated recovery learnability experiment. During a stand-up, supporting the
+# body with hands/knees is expected, so the generic non-foot collision penalty
+# conflicts with the motion. The foot contact term uses each clip's corrected
+# two-foot contact_mask; all other tracking rewards remain general_main's.
+rewards:
+  reward_scales:
+    collision: 0.0
+    teleop_contact_mask: 0.5

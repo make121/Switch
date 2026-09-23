@@ -3,7 +3,7 @@ import os.path as osp
 import random
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import joblib
 import numpy as np
@@ -100,12 +100,36 @@ class MotionLibBase:
         # Classify entries: single-skill vs cross-skill transitions (SG)
         self._single_skill_indices = []
         self._transition_indices = []
+        self._role_indices = {
+            "task_skill": [],
+            "recovery_skill": [],
+            "task_transition": [],
+            "recovery_transition": [],
+        }
         for i in range(self._num_unique_motions):
             entry = self._motion_data_list[i]
             if isinstance(entry, dict) and ('is_buffer' in entry or 'transition_distance' in entry):
                 self._transition_indices.append(i)
+                transition_role = entry.get(
+                    "transition_role", "task_transition")
+                if transition_role not in {
+                    "task_transition", "recovery_transition"
+                }:
+                    raise ValueError(
+                        f"Unknown transition_role {transition_role!r} "
+                        f"for motion entry {i}"
+                    )
+                self._role_indices[transition_role].append(i)
             else:
                 self._single_skill_indices.append(i)
+                skill_role = entry.get("skill_role", "task") \
+                    if isinstance(entry, dict) else "task"
+                bucket = f"{skill_role}_skill"
+                if bucket not in {"task_skill", "recovery_skill"}:
+                    raise ValueError(
+                        f"Unknown skill_role {skill_role!r} for motion entry {i}"
+                    )
+                self._role_indices[bucket].append(i)
         logger.info(f"Loaded {self._num_unique_motions} motions "
                     f"({len(self._single_skill_indices)} single-skill, "
                     f"{len(self._transition_indices)} transitions)")
@@ -120,6 +144,19 @@ class MotionLibBase:
         self._success_rate = torch.zeros(self._num_unique_motions).to(self._device)
         self._sampling_history = torch.zeros(self._num_unique_motions).to(self._device)
         self._sampling_prob = torch.ones(self._num_unique_motions).to(self._device) / self._num_unique_motions  # For use in sampling batches
+        self._recovery_motion_mask = torch.zeros(
+            self._num_unique_motions, dtype=torch.bool, device=self._device)
+        self._recovery_motion_mask[self._role_indices["recovery_skill"]] = True
+        self._recovery_rsi_enable = bool(self.m_cfg.get(
+            'recovery_rsi_enable', False))
+        self._recovery_rsi_entry_probability = float(self.m_cfg.get(
+            'recovery_rsi_entry_probability', 0.7))
+        self._recovery_rsi_entry_fraction = float(self.m_cfg.get(
+            'recovery_rsi_entry_fraction', 0.2))
+        if not 0.0 <= self._recovery_rsi_entry_probability <= 1.0:
+            raise ValueError("recovery_rsi_entry_probability must be in [0, 1]")
+        if not 0.0 < self._recovery_rsi_entry_fraction <= 1.0:
+            raise ValueError("recovery_rsi_entry_fraction must be in (0, 1]")
 
         # Build per-entry transition flag for cross-skill environment control
         self._is_transition_entry = torch.zeros(self._num_unique_motions, dtype=torch.bool, device=self._device)
@@ -129,8 +166,59 @@ class MotionLibBase:
         # Cross-skill weighted sampling (disabled by default)
         self._use_cross_skill_sampling = self.m_cfg.get('cross_skill_sampling_enable', False)
         self._cross_skill_ratio = self.m_cfg.get('cross_skill_ratio', 0.5)
-        if self._use_cross_skill_sampling and len(self._transition_indices) > 0:
+        self._use_role_sampling = self.m_cfg.get(
+            'role_sampling_enable', False)
+        if self._use_role_sampling:
+            ratios_cfg = self.m_cfg.get('role_sampling_ratios', {})
+            ratios = {
+                bucket: float(ratios_cfg.get(bucket, 0.0))
+                for bucket in self._role_indices
+            }
+            self._build_role_sampling_prob(ratios)
+        elif self._use_cross_skill_sampling and len(self._transition_indices) > 0:
             self._build_cross_skill_sampling_prob(self._cross_skill_ratio)
+
+    def _build_role_sampling_prob(self, ratios: Dict[str, float]):
+        """Assign probability mass to task/recovery motion categories.
+
+        Each category receives its configured total mass, divided uniformly
+        over entries in that category. This prevents five recovery clips from
+        automatically outweighing three task clips merely because there are
+        more files.
+        """
+        unknown = set(ratios) - set(self._role_indices)
+        if unknown:
+            raise ValueError(f"Unknown role sampling buckets: {sorted(unknown)}")
+        if any(value < 0.0 for value in ratios.values()):
+            raise ValueError("Role sampling ratios must be non-negative")
+        total = sum(ratios.values())
+        if total <= 0.0:
+            raise ValueError("Role sampling ratios must have positive mass")
+
+        normalized = {
+            bucket: ratios.get(bucket, 0.0) / total
+            for bucket in self._role_indices
+        }
+        prob = torch.zeros(self._num_unique_motions)
+        for bucket, indices in self._role_indices.items():
+            mass = normalized[bucket]
+            if mass > 0.0 and not indices:
+                raise ValueError(
+                    f"Role sampling bucket {bucket!r} has mass {mass:.3f} "
+                    "but no motion entries"
+                )
+            if indices:
+                prob[indices] = mass / len(indices)
+        prob = prob / prob.sum()
+        self._sampling_prob = prob.to(self._device)
+        logger.info(
+            "Role-aware motion sampling enabled: "
+            + ", ".join(
+                f"{bucket}={normalized[bucket]:.2f} "
+                f"({len(self._role_indices[bucket])} entries)"
+                for bucket in self._role_indices
+            )
+        )
 
     def _build_cross_skill_sampling_prob(self, ratio: float):
         """Build non-uniform sampling probabilities for cross-skill transitions.
@@ -607,12 +695,13 @@ class MotionLibBase:
             return (self._motion_num_frames[motion_ids] * self._sim_fps / self._motion_fps).ceil().int()
 
     def sample_time(self, motion_ids, truncate_time=None):
-        """Uniform RSI time sampling that never starts on a Buffer frame.
+        """RSI time sampling that never starts on a Buffer frame.
 
-        For ordinary motions this is identical to uniform continuous-time
-        sampling. Transition motions use rejection sampling against the raw
-        per-frame Buffer mask. A deterministic fallback guarantees the
-        contract even for trajectories dominated by Buffer frames.
+        Ordinary motions use uniform continuous-time sampling. When recovery
+        entry RSI is enabled, a configured fraction of recovery-skill resets
+        is drawn from the opening window. Transition motions use rejection
+        sampling against the raw per-frame Buffer mask. A deterministic
+        fallback guarantees the contract even for Buffer-heavy trajectories.
         """
         motion_len = self._motion_lengths[motion_ids].clone()
         if truncate_time is not None:
@@ -623,6 +712,21 @@ class MotionLibBase:
 
         motion_time = torch.rand(
             motion_ids.shape, device=self._device) * motion_len
+        if getattr(self, "_recovery_rsi_enable", False) \
+                and getattr(self, "_curr_motion_ids", None) is not None:
+            unique_ids = self._curr_motion_ids[motion_ids]
+            recovery = self._recovery_motion_mask[unique_ids]
+            choose_entry = torch.rand(
+                motion_ids.shape, device=self._device
+            ) < self._recovery_rsi_entry_probability
+            entry_rsi = recovery & choose_entry
+            if torch.any(entry_rsi):
+                motion_time[entry_rsi] = torch.rand(
+                    int(entry_rsi.sum().item()), device=self._device
+                ) * (
+                    motion_len[entry_rsi]
+                    * self._recovery_rsi_entry_fraction
+                )
         if not hasattr(self, "_motion_is_buffer"):
             return motion_time.to(self._device)
 

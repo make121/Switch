@@ -229,6 +229,15 @@ robot:
     motion_lib_type: 'origin'
     cross_skill_sampling_enable: true  # SG weighted cross-skill sampling switch
     cross_skill_ratio: 0.             # fraction of envs for transition trajectories
+    role_sampling_enable: false       # task/recovery/transition bucket sampling
+    role_sampling_ratios:
+      task_skill: 0.40
+      recovery_skill: 0.35
+      task_transition: 0.15
+      recovery_transition: 0.10
+    recovery_rsi_enable: false
+    recovery_rsi_entry_probability: 0.70
+    recovery_rsi_entry_fraction: 0.20
     motion_file : ???
     asset:
       assetRoot: "description/robots/g1/"
@@ -412,4 +421,3 @@ robot:
 #         fps: 200 # 1/dt , dt = 0.005
 #         control_freq_inv: 4  # decimation
 #         substeps: 1
-

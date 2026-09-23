@@ -54,6 +54,11 @@ def main():
     # Options
     parser.add_argument("--labels", nargs="+", help="Skill name labels")
     parser.add_argument(
+        "--roles", nargs="+", choices=("task", "recovery"),
+        help="Role per input motion. With recovery roles, only task->task "
+             "and recovery->task cross-skill edges are built.",
+    )
+    parser.add_argument(
         "-o", "--output", default="./sg_output", help="Output directory"
     )
     parser.add_argument(
@@ -99,6 +104,18 @@ def main():
         help="Representative transitions per source bin and target skill",
     )
     parser.add_argument(
+        "--recovery-exit-fraction", type=float, default=0.2,
+        help="Tail fraction of each recovery clip eligible as an exit",
+    )
+    parser.add_argument(
+        "--task-entry-fraction", type=float, default=0.2,
+        help="Prefix fraction of each task eligible for recovery exits",
+    )
+    parser.add_argument(
+        "--recovery-edges-per-task", type=int, default=3,
+        help="Maximum trained recovery->task macro edges per directed pair",
+    )
+    parser.add_argument(
         "--fps", type=float, default=None, help="Override FPS for all motions"
     )
     parser.add_argument(
@@ -141,12 +158,22 @@ def main():
         while len(labels) < len(pkl_paths):
             labels.append(f"skill_{len(labels):02d}")
 
-    print(f"\nSkills: {list(zip(labels, [Path(p).name for p in pkl_paths]))}")
+    roles = args.roles
+    if roles is None:
+        roles = ["task"] * len(pkl_paths)
+    if len(roles) != len(pkl_paths):
+        parser.error(
+            f"--roles requires one value per input file "
+            f"({len(roles)} roles for {len(pkl_paths)} files)"
+        )
+
+    print(f"\nSkills: {list(zip(labels, roles, [Path(p).name for p in pkl_paths]))}")
 
     # Build
     builder = SkillGraphBuilder(
         motion_files=pkl_paths,
         skill_labels=labels,
+        skill_roles=roles,
         cross_skill_threshold=args.threshold,
         cross_skill_topk=args.topk,
         buffer_base_threshold=args.buffer_base,
@@ -157,6 +184,9 @@ def main():
         transition_selection=args.transition_selection,
         phase_bins=args.phase_bins,
         edges_per_phase_bin=args.edges_per_bin,
+        recovery_exit_fraction=args.recovery_exit_fraction,
+        task_entry_fraction=args.task_entry_fraction,
+        recovery_edges_per_task=args.recovery_edges_per_task,
         fps=args.fps,
     )
 

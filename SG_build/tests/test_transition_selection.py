@@ -1,3 +1,5 @@
+import numpy as np
+
 from SG_build.skill_graph_V2 import GraphEdge, SkillGraph, SkillGraphBuilder
 
 
@@ -55,3 +57,38 @@ def test_pruning_keeps_temporal_and_only_selected_cross_edges():
     assert graph.edges == [temporal, kept]
     assert 2 not in graph._adj
     assert graph._adj[1] == [(10, kept)]
+
+
+def test_recovery_roles_only_allow_directed_exits_to_tasks():
+    builder = SkillGraphBuilder(
+        motion_files=["task_a", "task_b", "rec_a", "rec_b"],
+        skill_roles=["task", "task", "recovery", "recovery"],
+    )
+
+    assert builder._pair_allowed(0, 1)
+    assert builder._pair_allowed(2, 0)
+    assert not builder._pair_allowed(0, 2)
+    assert not builder._pair_allowed(2, 3)
+
+
+def test_recovery_exit_and_task_entry_windows_respect_boundaries():
+    builder = SkillGraphBuilder(
+        motion_files=["task", "recovery"],
+        skill_roles=["task", "recovery"],
+        exclude_boundary_frames=10,
+        recovery_exit_fraction=0.2,
+        task_entry_fraction=0.2,
+    )
+    builder._features = [np.empty(100, dtype=object),
+                         np.empty(200, dtype=object)]
+
+    src_mask, dst_mask = builder._pair_endpoint_masks(1, 0)
+
+    # Recovery tail: [160, 190); final ten boundary frames stay excluded.
+    assert src_mask[:160].all()
+    assert not src_mask[160:190].any()
+    assert src_mask[190:].all()
+    # Task prefix: [10, 20); first ten boundary frames stay excluded.
+    assert dst_mask[:10].all()
+    assert not dst_mask[10:20].any()
+    assert dst_mask[20:].all()

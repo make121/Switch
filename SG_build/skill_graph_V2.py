@@ -292,6 +292,7 @@ class SkillGraph:
     nodes: List[GraphNode] = field(default_factory=list)
     edges: List[GraphEdge] = field(default_factory=list)
     skill_names: List[str] = field(default_factory=list)
+    skill_roles: List[str] = field(default_factory=list)
     skill_lengths: List[int] = field(default_factory=list)  # frames per skill
     buffer_count: int = 0  # number of buffer nodes added
     buffer_edge_count: int = 0  # number of edges involving buffer nodes
@@ -342,6 +343,7 @@ class SkillGraph:
             "num_edges": len(self.edges),
             "num_buffer_edges": self.buffer_edge_count,
             "skill_names": self.skill_names,
+            "skill_roles": self.skill_roles,
             "skill_lengths": [int(x) for x in self.skill_lengths],
             # Per-node state features for the online skill scheduler
             # (spec 1.1): q = dof, q_dot = dof_vel, p_hat = root_trans.
@@ -399,6 +401,7 @@ class SkillGraphBuilder:
         self,
         motion_files: List[str],  # paths to .pkl files, one per skill
         skill_labels: Optional[List[str]] = None,
+        skill_roles: Optional[List[str]] = None,
         cross_skill_topk: int = 5,  # top-K nearest neighbours per frame
         cross_skill_threshold: float = 30.0,  # max L1 distance for an edge
         buffer_base_threshold: float = 1.0,  # distance per buffer node
@@ -409,10 +412,24 @@ class SkillGraphBuilder:
         transition_selection: str = "distance",  # distance (legacy) or phase
         phase_bins: int = 16,  # source-skill temporal bins in phase mode
         edges_per_phase_bin: int = 1,  # representative macros per bin/pair
+        recovery_exit_fraction: float = 0.2,
+        task_entry_fraction: float = 0.2,
+        recovery_edges_per_task: int = 3,
         fps: Optional[float] = None,  # override fps (default: from data)
     ):
         self.motion_files = motion_files
         self.skill_labels = skill_labels or [f"skill_{i}" for i in range(len(motion_files))]
+        self.skill_roles = skill_roles or ["task"] * len(motion_files)
+        if len(self.skill_roles) != len(motion_files):
+            raise ValueError(
+                "skill_roles must contain one role per motion file "
+                f"({len(self.skill_roles)} roles for {len(motion_files)} files)"
+            )
+        invalid_roles = sorted(set(self.skill_roles) - {"task", "recovery"})
+        if invalid_roles:
+            raise ValueError(
+                f"Unsupported skill roles {invalid_roles}; use task or recovery"
+            )
         self.cross_skill_topk = cross_skill_topk
         self.cross_skill_threshold = cross_skill_threshold
         self.buffer_base_threshold = buffer_base_threshold
@@ -430,6 +447,15 @@ class SkillGraphBuilder:
         self.transition_selection = transition_selection
         self.phase_bins = phase_bins
         self.edges_per_phase_bin = edges_per_phase_bin
+        if not 0.0 < recovery_exit_fraction <= 1.0:
+            raise ValueError("recovery_exit_fraction must be in (0, 1]")
+        if not 0.0 < task_entry_fraction <= 1.0:
+            raise ValueError("task_entry_fraction must be in (0, 1]")
+        if recovery_edges_per_task <= 0:
+            raise ValueError("recovery_edges_per_task must be positive")
+        self.recovery_exit_fraction = recovery_exit_fraction
+        self.task_entry_fraction = task_entry_fraction
+        self.recovery_edges_per_task = recovery_edges_per_task
         self.fps = fps
 
         # Internal state
@@ -512,7 +538,10 @@ class SkillGraphBuilder:
 
     def build_base_graph(self) -> SkillGraph:
         """Create nodes for every frame and add temporal within-skill edges."""
-        graph = SkillGraph(skill_names=self.skill_labels)
+        graph = SkillGraph(
+            skill_names=self.skill_labels,
+            skill_roles=self.skill_roles,
+        )
         gid = 0
         for skill_id, feats in enumerate(self._features):
             n_frames = len(feats)
@@ -553,21 +582,20 @@ class SkillGraphBuilder:
         for skill_id, feats in enumerate(self._features):
             all_features.extend(feats)
 
-        # Precompute boundary masks once per skill
-        boundary_masks = [self._boundary_mask(len(f)) for f in self._features]
-
         for src_skill in range(num_skills):
             src_feats = self._features[src_skill]
             src_start = sum(graph.skill_lengths[:src_skill])
-            src_mask = boundary_masks[src_skill]
 
             for dst_skill in range(num_skills):
                 if dst_skill == src_skill:
                     continue
+                if not self._pair_allowed(src_skill, dst_skill):
+                    continue
 
                 dst_feats = self._features[dst_skill]
                 dst_start = sum(graph.skill_lengths[:dst_skill])
-                dst_mask = boundary_masks[dst_skill]
+                src_mask, dst_mask = self._pair_endpoint_masks(
+                    src_skill, dst_skill)
 
                 # Subsample source frames for efficiency, skipping src
                 # frames that fall within the source skill's boundary zone.
@@ -612,6 +640,43 @@ class SkillGraphBuilder:
               f"(threshold={self.cross_skill_threshold}, topk={self.cross_skill_topk}, "
               f"subsample_stride={self.subsample_stride}, "
               f"exclude_boundary_frames={self.exclude_boundary_frames})")
+
+    def _pair_allowed(self, src_skill: int, dst_skill: int) -> bool:
+        """Whether a directed cross-skill pair is part of the train graph.
+
+        Task skills retain their existing task-to-task connectivity. Recovery
+        clips are one-way intermediates: their stable tail may connect back
+        to a task, while task-to-recovery and recovery-to-recovery edges are
+        deliberately excluded. Runtime fall state attaches to a recovery
+        entry through the recovery selector, not through a synthetic graph
+        edge that teaches the robot to fall.
+        """
+        src_role = self.skill_roles[src_skill]
+        dst_role = self.skill_roles[dst_skill]
+        return (src_role, dst_role) in {
+            ("task", "task"),
+            ("recovery", "task"),
+        }
+
+    def _pair_endpoint_masks(
+        self, src_skill: int, dst_skill: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Return True masks for endpoints forbidden for this pair."""
+        src_len = len(self._features[src_skill])
+        dst_len = len(self._features[dst_skill])
+        src_mask = self._boundary_mask(src_len)
+        dst_mask = self._boundary_mask(dst_len)
+
+        if self.skill_roles[src_skill] == "recovery":
+            exit_start = int(math.floor(
+                src_len * (1.0 - self.recovery_exit_fraction)))
+            src_mask[:exit_start] = True
+
+            entry_end = max(1, int(math.ceil(
+                dst_len * self.task_entry_fraction)))
+            dst_mask[entry_end:] = True
+
+        return src_mask, dst_mask
 
     # ------------------------------------------------------------------
     # Step 4: Buffer nodes  (Sec III-B.3)
@@ -773,9 +838,16 @@ class SkillGraphBuilder:
                     and src_start <= e.src < src_start + graph.skill_lengths[src_skill]
                     and dst_start <= e.dst < dst_start + graph.skill_lengths[dst_skill]
                 ]
-                selected_by_pair[(src_skill, dst_skill)] = self._select_pair_edges(
+                selected = self._select_pair_edges(
                     pair_edges, src_start, graph.skill_lengths[src_skill]
                 )
+                if self.skill_roles[src_skill] == "recovery":
+                    # Recovery exits should remain a small directed interface,
+                    # not phase-dense edges that dominate the augmented set.
+                    selected = sorted(
+                        selected, key=lambda edge: edge.weight
+                    )[:self.recovery_edges_per_task]
+                selected_by_pair[(src_skill, dst_skill)] = selected
 
         all_selected = [
             edge for edges in selected_by_pair.values() for edge in edges
@@ -944,6 +1016,13 @@ class SkillGraphBuilder:
                     traj_dict["source_skill"] = np.array(traj_source, dtype=np.int32)
                     traj_dict["src_skill"] = src_skill
                     traj_dict["dst_skill"] = dst_skill
+                    traj_dict["src_role"] = self.skill_roles[src_skill]
+                    traj_dict["dst_role"] = self.skill_roles[dst_skill]
+                    traj_dict["transition_role"] = (
+                        "recovery_transition"
+                        if self.skill_roles[src_skill] == "recovery"
+                        else "task_transition"
+                    )
                     traj_dict["transition_distance"] = edge.weight
 
                     name = (f"trans_{traj_idx:03d}_"
@@ -1007,7 +1086,11 @@ class SkillGraphBuilder:
             merged = dict(self._augmented_motions)
             # Add original single-skill motions
             for i, (label, mot) in enumerate(zip(self.skill_labels, self._motions)):
-                merged[f"skill_{label}"] = mot
+                tagged_motion = dict(mot)
+                tagged_motion["skill_id"] = i
+                tagged_motion["skill_label"] = label
+                tagged_motion["skill_role"] = self.skill_roles[i]
+                merged[f"skill_{label}"] = tagged_motion
             merged_path = out / "merged_training.pkl"
             save_motion_pkl(merged, str(merged_path))
             print(f"Merged training data ({len(merged)} entries) saved to {merged_path}")
@@ -1027,6 +1110,10 @@ class SkillGraphBuilder:
         print(f"Skill Graph Summary")
         print(f"{'='*50}")
         print(f"  Skills:          {len(g.skill_lengths)}")
+        role_counts = {
+            role: g.skill_roles.count(role) for role in sorted(set(g.skill_roles))
+        }
+        print(f"  Skill roles:     {role_counts}")
         print(f"  Total frames:    {sum(g.skill_lengths)}")
         print(f"  Nodes (total):   {g.num_nodes}")
         print(f"  Nodes (original):{g.num_nodes - g.buffer_count}")

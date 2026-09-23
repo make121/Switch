@@ -56,6 +56,7 @@ class SkillGraphData:
     buffer_dst: np.ndarray   # (N,) int, dst node of the buffer chain (-1 if N/A)
     skill_names: List[str]
     skill_lengths: List[int]
+    skill_roles: List[str]   # one of {task, recovery}; old graphs default to task
     # adj[u] = [(v, weight, edge_type)]; rev_adj[v] = [(u, weight, edge_type)]
     adj: List[List[Tuple[int, float, str]]] = field(default_factory=list)
     rev_adj: List[List[Tuple[int, float, str]]] = field(default_factory=list)
@@ -126,6 +127,19 @@ class SkillGraphData:
                               reverse=True))
             for key, ids in grouped_buffers.items()
         }
+        skill_names = list(g["skill_names"])
+        skill_roles = list(g.get("skill_roles", ["task"] * len(skill_names)))
+        if len(skill_roles) != len(skill_names):
+            raise ValueError(
+                f"{path} has {len(skill_roles)} skill_roles for "
+                f"{len(skill_names)} skills."
+            )
+        invalid_roles = sorted(set(skill_roles) - {"task", "recovery"})
+        if invalid_roles:
+            raise ValueError(
+                f"{path} contains invalid skill_roles: {invalid_roles}; "
+                "expected only 'task' or 'recovery'."
+            )
         graph = cls(
             nodes=nodes,
             skill_ids=np.asarray([n["skill_id"] for n in g["nodes"]], dtype=np.int64),
@@ -134,8 +148,9 @@ class SkillGraphData:
             kappas=np.asarray([n["kappa"] for n in g["nodes"]], dtype=np.int64),
             buffer_src=buffer_src,
             buffer_dst=buffer_dst,
-            skill_names=list(g["skill_names"]),
+            skill_names=skill_names,
             skill_lengths=[int(x) for x in g["skill_lengths"]],
+            skill_roles=skill_roles,
             sigma_q=sigma_q, sigma_qdot=sigma_qdot, sigma_p=sigma_p,
             w_q=w_q, w_qdot=w_qdot, w_p=w_p, lambda_sw=lambda_sw,
             buffer_chains=buffer_chains,
@@ -226,6 +241,13 @@ class SkillGraphData:
         """
         start = sum(self.skill_lengths[:skill_id])
         return start, start + self.skill_lengths[skill_id]
+
+    def skills_with_role(self, role: str) -> List[int]:
+        """Return skill ids carrying ``role`` in dataset order."""
+        if role not in {"task", "recovery"}:
+            raise ValueError(f"Invalid skill role: {role}")
+        return [sid for sid, value in enumerate(self.skill_roles)
+                if value == role]
 
     def target_set(self, skill_id: int, tau: float) -> List[int]:
         """Command targets: opening frames plus trained Buffer landings.

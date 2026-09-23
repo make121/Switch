@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - /rewards/motion_tracking/recovery_contact_02_04
+  - _self_
+
+# For the sole-levelled five-clip experiment. Keypoint positions alone can
+# hide a folded leg; retain the contact reward and also track all joint angles.
+rewards:
+  reward_scales:
+    teleop_joint_position: 1.0
+  reward_tracking_sigma:
+    teleop_joint_pos: 0.3

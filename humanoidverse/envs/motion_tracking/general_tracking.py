@@ -1231,6 +1231,47 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         # print(f"{rew.mean()=} | {rew.std()=} | {error_contact_mask.mean()=} | {error_contact_mask.std()=}")
         return rew
 
+    def _reward_task_collision(self):
+        """Penalize non-foot contact only on task clips and task transitions.
+
+        Hands and knees are legitimate supports while getting up.  The
+        original collision term is still useful on ordinary task skills, but
+        applying it unchanged to a mixed task/recovery batch fights recovery.
+        Recovery-to-task transitions are exempt until a task clip begins.
+        """
+        if not hasattr(self, "_task_collision_motion_mask"):
+            mask = torch.zeros(
+                self._motion_lib._num_unique_motions,
+                device=self.device,
+                dtype=torch.bool,
+            )
+            role_indices = self._motion_lib._role_indices
+            mask[role_indices["task_skill"]] = True
+            mask[role_indices["task_transition"]] = True
+            self._task_collision_motion_mask = mask
+        return super()._reward_collision() * self._task_collision_motion_mask[
+            self.curr_motion_ids
+        ].float()
+
+    def _recovery_reward_mask(self):
+        if not hasattr(self, "_recovery_reward_motion_mask"):
+            mask = torch.zeros(
+                self._motion_lib._num_unique_motions,
+                device=self.device,
+                dtype=torch.bool,
+            )
+            role_indices = self._motion_lib._role_indices
+            mask[role_indices["recovery_skill"]] = True
+            mask[role_indices["recovery_transition"]] = True
+            self._recovery_reward_motion_mask = mask
+        return self._recovery_reward_motion_mask[self.curr_motion_ids].float()
+
+    def _reward_recovery_contact_mask(self):
+        return self._reward_teleop_contact_mask() * self._recovery_reward_mask()
+
+    def _reward_recovery_joint_position(self):
+        return self._reward_teleop_joint_position() * self._recovery_reward_mask()
+
     def _reward_teleop_contact_mask_v2(self):
         cur_contact_mask = self.contacts_filt
         ref_contact_mask = self.ref_contact_mask

@@ -25,6 +25,88 @@ from datetime import timedelta
 
 TMP_SMPL_DIR = "/tmp/smpl"
 
+
+def correct_target_ground_height(
+    motion_data,
+    target_mjcf_path,
+    clearance=0.005,
+    smooth_sigma=3.0,
+):
+    """Lift retargeted root heights so target collision geoms stay above ground.
+
+    The pre-retarget ``correct_motion`` function grounds the source SMPL mesh,
+    but matching source/target joints does not account for the G1 collision
+    geometry.  This final pass measures signed distance against the MuJoCo
+    ground plane and applies a smooth, time-varying upward root correction.
+    """
+    import mujoco
+    from scipy.ndimage import gaussian_filter1d, maximum_filter1d
+
+    model = mujoco.MjModel.from_xml_path(str(target_mjcf_path))
+    data = mujoco.MjData(model)
+    if model.nq != 7 + motion_data["dof"].shape[1]:
+        raise ValueError(
+            f"Target model nq={model.nq} does not match motion DoF "
+            f"count {motion_data['dof'].shape[1]}"
+        )
+
+    plane_geoms = [
+        i for i in range(model.ngeom)
+        if model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
+    ]
+    if not plane_geoms:
+        raise ValueError(f"No ground plane found in {target_mjcf_path}")
+    ground_geom = plane_geoms[0]
+    collision_geoms = [
+        i for i in range(model.ngeom)
+        if i != ground_geom
+        and (model.geom_contype[i] != 0 or model.geom_conaffinity[i] != 0)
+    ]
+    if not collision_geoms:
+        raise ValueError(f"No collision geoms found in {target_mjcf_path}")
+
+    root_trans = motion_data["root_trans_offset"]
+    root_rot = motion_data["root_rot"]
+    dof = motion_data["dof"]
+    min_distances = np.empty(len(root_trans), dtype=np.float64)
+    fromto = np.empty(6, dtype=np.float64)
+
+    for frame in range(len(root_trans)):
+        data.qpos[:3] = root_trans[frame]
+        # Motion PKLs use scipy's xyzw; MuJoCo free joints use wxyz.
+        quat_xyzw = root_rot[frame]
+        data.qpos[3:7] = np.roll(quat_xyzw, 1)
+        data.qpos[7:] = dof[frame]
+        mujoco.mj_forward(model, data)
+        min_distances[frame] = min(
+            mujoco.mj_geomDistance(
+                model, data, ground_geom, geom_id, 10.0, fromto
+            )
+            for geom_id in collision_geoms
+        )
+
+    required = np.maximum(float(clearance) - min_distances, 0.0)
+    if smooth_sigma > 0 and len(required) > 1:
+        # Dilate before smoothing.  With a radius matching the Gaussian
+        # support, the smoothed envelope remains above every local required
+        # correction instead of reintroducing penetration.
+        radius = max(1, int(np.ceil(3.0 * smooth_sigma)))
+        upper = maximum_filter1d(
+            required, size=2 * radius + 1, mode="nearest"
+        )
+        correction = gaussian_filter1d(
+            upper, sigma=smooth_sigma, mode="nearest", truncate=3.0
+        )
+        correction = np.maximum(correction, required)
+    else:
+        correction = required
+
+    motion_data["root_trans_offset"] = root_trans.copy()
+    motion_data["root_trans_offset"][:, 2] += correction.astype(
+        root_trans.dtype, copy=False
+    )
+    return min_distances, correction
+
 def foot_detect(positions, thres=0.002):
     fid_r, fid_l = [8, 11], [7, 10]
     positions = positions.numpy()
@@ -90,8 +172,47 @@ def main(
     upright_start: bool = True,  # By default, let's start upright (for consistency across all models).
     humanoid_mjcf_path: Optional[str] = "../description/robots/g1/smpl_humanoid.xml",
     force_retarget: bool = True,
-    correct: bool = False
+    correct: bool = False,
+    pkl_output_dir: Path = Path("./retargeted_motion_data/mink"),
+    target_ground_correct: bool = False,
+    target_mjcf_path: Path = Path(
+        "../description/robots/g1/g1_23dof_lock_wrist_fitmotionONLY.xml"
+    ),
+    ground_clearance: float = 0.005,
+    ground_smooth_sigma: float = 3.0,
+    height_only_input_dir: Optional[Path] = None,
 ):
+    if height_only_input_dir is not None:
+        if not target_ground_correct:
+            raise ValueError("--height-only-input-dir requires --target-ground-correct")
+        if height_only_input_dir.resolve() == pkl_output_dir.resolve():
+            raise ValueError("Input and output PKL directories must differ")
+        input_paths = sorted(height_only_input_dir.glob("*.pkl"))
+        if not input_paths:
+            raise ValueError(f"No PKL files found in {height_only_input_dir}")
+        pkl_output_dir.mkdir(parents=True, exist_ok=True)
+        for input_path in input_paths:
+            with input_path.open("rb") as stream:
+                motions = pickle.load(stream)
+            if not isinstance(motions, dict) or len(motions) != 1:
+                raise ValueError(f"Expected one named motion in {input_path}")
+            motion = next(iter(motions.values()))
+            min_distances, height_correction = correct_target_ground_height(
+                motion,
+                target_mjcf_path=target_mjcf_path,
+                clearance=ground_clearance,
+                smooth_sigma=ground_smooth_sigma,
+            )
+            output_path = pkl_output_dir / input_path.name
+            with output_path.open("wb") as stream:
+                pickle.dump(motions, stream, protocol=pickle.HIGHEST_PROTOCOL)
+            print(
+                f"{input_path.name}: minimum before={min_distances.min():.4f} m, "
+                f"maximum lift={height_correction.max():.4f} m; "
+                f"saved {output_path}"
+            )
+        return
+
     if robot_type is None:
         robot_type = humanoid_type
     elif robot_type in ["h1", "g1"]:
@@ -412,15 +533,26 @@ def main(
                     motion_data['pose_aa'] = pose_aa
                     motion_data['dof'] = dof
 
-                    output_folder_path = "./retargeted_motion_data/mink"
+                    if target_ground_correct:
+                        min_distances, height_correction = correct_target_ground_height(
+                            motion_data,
+                            target_mjcf_path=target_mjcf_path,
+                            clearance=ground_clearance,
+                            smooth_sigma=ground_smooth_sigma,
+                        )
+                        print(
+                            "Target collision-ground correction: "
+                            f"minimum before={min_distances.min():.4f} m, "
+                            f"maximum lift={height_correction.max():.4f} m"
+                        )
 
-                    os.makedirs(output_folder_path, exist_ok=True)
-                    path = os.path.join(output_folder_path, f"{filename.stem}_retarget.pkl")
+                    os.makedirs(pkl_output_dir, exist_ok=True)
+                    path = pkl_output_dir / f"{filename.stem}_retarget.pkl"
 
                     print(path)
 
                     data = {filename: motion_data}
-                    with open((path), 'wb') as f:
+                    with open(path, 'wb') as f:
                         pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
                     
                     if robot_type in ["h1", "g1"]:

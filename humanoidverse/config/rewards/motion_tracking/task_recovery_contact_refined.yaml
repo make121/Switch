@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - /rewards/motion_tracking/general_main
+  - _self_
+
+# For a unified task/recovery graph. Preserve general_main's task rewards.
+# The task-only collision term keeps the original -30 penalty, while the
+# recovery-only terms permit hand/knee support and teach level foot placement.
+rewards:
+  reward_scales:
+    collision: 0.0
+    task_collision: -30.0
+    recovery_contact_mask: 0.5
+    recovery_joint_position: 1.0
+  reward_tracking_sigma:
+    teleop_joint_pos: 0.3

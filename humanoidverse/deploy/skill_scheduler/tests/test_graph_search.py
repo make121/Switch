@@ -106,6 +106,28 @@ def test_deploy_edge_weight():
     print("PASS test_deploy_edge_weight")
 
 
+def test_skill_roles_load_and_backward_compatibility():
+    # Existing graphs have no skill_roles field and must retain their old
+    # behaviour: every skill is treated as a normal task skill.
+    old_graph = load_toy()
+    assert old_graph.skill_roles == ["task", "task"]
+    assert old_graph.skills_with_role("task") == [0, 1]
+    assert old_graph.skills_with_role("recovery") == []
+
+    recovery_json = make_toy_graph()
+    recovery_json["skill_roles"] = ["task", "recovery"]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(recovery_json, f)
+        path = f.name
+    recovery_graph = SkillGraphData.from_json(
+        path, sigma_q=1.0, sigma_qdot=1.0, sigma_p=1.0,
+        lambda_sw=LAMBDA_SW)
+    assert recovery_graph.skill_roles == ["task", "recovery"]
+    assert recovery_graph.skills_with_role("task") == [0]
+    assert recovery_graph.skills_with_role("recovery") == [1]
+    print("PASS test_skill_roles_load_and_backward_compatibility")
+
+
 def test_value_function_hand_computed():
     g = load_toy()
     planner = GraphSearchPlanner(g)
@@ -630,6 +652,7 @@ def test_nn_planner_unsafe_jump():
 
 def main():
     test_deploy_edge_weight()
+    test_skill_roles_load_and_backward_compatibility()
     test_buffer_macro_expansion_preserves_cost()
     test_value_function_hand_computed()
     test_entry_check_branches()

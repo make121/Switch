@@ -50,6 +50,7 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         self._initialized = False
         self._installed_version = -1
         self._traj_fps = 30.0
+        self._installed_is_transition = False
         self._prev_ep_len = None
         self._just_injected = False
         self._reset_detect_cooldown = 0
@@ -172,6 +173,11 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
                 note=""):
         env = self.env
         lib = env._motion_lib
+        # A graph path containing Buffer nodes is a one-shot transition
+        # reference.  It must never be replayed after motion_end; once it is
+        # exhausted the target skill becomes the persistent reference.
+        self._installed_is_transition = bool(
+            np.any(self.graph.is_buffer[np.asarray(path, dtype=np.int64)]))
         traj = self.ref_builder.build_trajectory(path)
         if align:
             # Transition reference: anchor the first frame to the robot's
@@ -296,6 +302,27 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         previous_dones = actor_state.get("dones")
         previous_done = previous_dones is not None \
             and bool(previous_dones[0])
+
+        # Hand off a one-shot transition to the full target skill before the
+        # next env step can terminate it.  The env checks motion_end after
+        # incrementing episode_length_buf, so predict that exact next time
+        # here.  This avoids an env reset against the short transition and,
+        # more importantly, prevents that transition from being rewound and
+        # replayed indefinitely.
+        if self._installed_is_transition and not previous_done \
+                and self.scheduler.current_cmd is not None:
+            next_motion_time = (ep_len + 1) * float(env.dt) \
+                + float(env.motion_start_times[0])
+            installed_motion_len = float(env.motion_len[0])
+            if next_motion_time > installed_motion_len:
+                logger.info(
+                    "Transition reference ending -> install full target "
+                    f"skill (command {self.scheduler.current_cmd}: "
+                    f"{self.graph.skill_names[self.scheduler.current_cmd]})")
+                self._inject_pure_skill(self.scheduler.current_cmd, t)
+                self._prev_ep_len = int(env.episode_length_buf[0])
+                return actor_state
+
         natural_reset = previous_done or (
             self._prev_ep_len is not None
             and ep_len < self._prev_ep_len
@@ -307,6 +334,23 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             self._reset_detect_cooldown -= 1
         self._prev_ep_len = ep_len
         if natural_reset and self.scheduler.current_cmd is not None:
+            ended_transition = self._installed_is_transition \
+                and "motion_end" in getattr(
+                    self, "_last_termination", "").split(",")
+            if ended_transition:
+                # Fallback for a boundary/timing race: never rewind a
+                # completed Buffer path.  The env has already reset once, so
+                # this branch may perform a second reset, but it converts the
+                # reference to a persistent pure-skill trajectory instead of
+                # entering an infinite short-path reset loop.
+                logger.info(
+                    "Transition motion_end detected -> replace one-shot "
+                    f"reference with full target skill (command "
+                    f"{self.scheduler.current_cmd}: "
+                    f"{self.graph.skill_names[self.scheduler.current_cmd]})")
+                self._inject_pure_skill(self.scheduler.current_cmd, t)
+                self._prev_ep_len = int(env.episode_length_buf[0])
+                return actor_state
             logger.info(
                 f"Env reset detected ({getattr(self, '_last_termination', '?')})"
                 f" -> retry current loaded reference without MotionLib reload "
