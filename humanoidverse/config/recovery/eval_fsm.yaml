@@ -1,0 +1,67 @@
+# @package _global_
+# Load with +recovery=eval_fsm alongside the online scheduler callback.
+robot:
+  motion:
+    role_sampling_enable: false
+    cross_skill_sampling_enable: false
+    recovery_rsi_enable: false
+env:
+  config:
+    enforce_randomize_motion_start_eval: false
+algo:
+  config:
+    eval_callbacks:
+      skill_scheduler:
+        config:
+          recovery_fsm:
+            enabled: true
+            # One-shot simulated recovery event; -1 disables. Does not push/teleport.
+            diagnostic_trigger_step: -1
+            # Optional separate GetUp weights; task checkpoint still owns exits.
+            policy_checkpoint: null
+            # t key applies this velocity impulse; automatic one-shot disabled.
+            fall_push_step: -1
+            fall_push_velocity_xy: [1.5, 0.0]
+            output_path: ${eval_log_dir}/recovery_events.jsonl
+            fallback_task_skill: 0
+            recoverable_terminations: [ref_pos_z, ref_ori, body_z, motion_far, gravity, contact]
+            hard_terminations: [time_out, dof_pos_limit, dof_vel_limit, torque_limit]
+            max_recovery_attempts: 2
+            # Emit attempt_start/attempt_result labels only in selected modes.
+            attempt_logging:
+              enabled: true
+              modes: [collect]
+            recovery_timeout_s: 20.0
+            entry_grace_s: 0.25
+            # Opt-in trace using exactly the body_z termination keypoints.
+            entry_diagnostics:
+              enabled: false
+              detailed: false
+              window_s: 1.0
+              interval_s: 0.02
+            policy_blend_s: 0.2
+            success_hold_s: 1.0
+            max_distance_from_origin_m: 20.0
+            damping:
+              kd_scale: 0.5
+              torque_limit_ratio: 0.25
+              # Fraction of rated torque per control step (scaled per substep).
+              torque_slew_limit_ratio: 0.10
+              root_lin_vel_threshold: 0.15
+              root_ang_vel_threshold: 0.30
+              dof_vel_rms_threshold: 0.50
+              settle_hold_s: 0.40
+              timeout_s: 3.0
+            selector:
+              recovery_skill_ids: [3, 4, 5, 6, 7]
+              # One visually reviewed canonical entry for each recovery clip.
+              entry_frames: {3: 0, 4: 0, 5: 0, 6: 0, 7: 0}
+              # collect: always try nearest entry and gather calibration data.
+              # enforce: reject when distance exceeds max_entry_distance.
+              admission_mode: collect
+              max_entry_distance: null
+              top_k: 3
+              exclude_radius_frames: 10
+              # Sum(weight * mean_absolute_error / physical-unit scale).
+              scales: {q: 0.5, qdot: 2.0, projected_gravity: 1.0, root_height: 0.2, foot_contact: 1.0}
+              weights: {q: 1.25, qdot: 0.10, projected_gravity: 4.0, root_height: 0.50, foot_contact: 1.50}

@@ -18,6 +18,11 @@ import mujoco
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter
 
+if __package__:
+    from .reference_pose import require_consistent_pose
+else:
+    from reference_pose import require_consistent_pose
+
 
 SPECS = {
     "140_02": {"start": 116, "full": 140, "trim_last": 0},
@@ -25,8 +30,10 @@ SPECS = {
 }
 
 
-def geometry_heights(model, motion):
+def geometry_heights(model, motion, *, check_pose_consistency=True):
     """Return signed floor distances of all collision geoms and both feet."""
+    if check_pose_consistency:
+        require_consistent_pose(model, motion)
     data = mujoco.MjData(model)
     plane = next(
         (g for g in range(model.ngeom)

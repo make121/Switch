@@ -27,6 +27,8 @@ from humanoidverse.utils.torch_utils import (
 
 
 class LeggedRobotGeneralTracking(LeggedRobotBase):
+    BODY_Z_TERMINATION_INDICES = (4, 10, 24, 25, 26)
+
     def __init__(self, config, device):
         self.init_done = False
         self.debug_viz = True
@@ -229,7 +231,7 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
 
     def _update_tasks_callback(self):
         super()._update_tasks_callback()
-        if self.config.resample_motion_when_training:
+        if self.config.resample_motion_when_training and getattr(self, "recovery_controller", None) is None:
             if self.common_step_counter % self.resample_time_interval == 0:
                 logger.info(f"Resampling motion at step {self.common_step_counter}")
                 self.resample_motion()
@@ -289,7 +291,7 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
             thr = getattr(self.config.termination_scales, "terminate_by_body_z_threshold", 0.25)
             self.reset_buf_terminate_by["body_z"] = torch.any(
                 termination_local_body_pos[
-                    :, [4, 10, 24, 25, 26], -1
+                    :, list(self.BODY_Z_TERMINATION_INDICES), -1
                 ].abs() > thr,
                 dim=-1,
             )
@@ -522,8 +524,17 @@ class LeggedRobotGeneralTracking(LeggedRobotBase):
         dof_vel_noise = self.config.init_noise_scale.dof_vel * self.config.noise_to_initial_level
         dof_pos = motion_res["dof_pos"][env_ids]
         dof_vel = motion_res["dof_vel"][env_ids]
-        self.simulator.dof_pos[env_ids] = dof_pos + torch.rand_like(dof_pos) * dof_pos_noise
-        self.simulator.dof_vel[env_ids] = dof_vel + torch.rand_like(dof_vel) * dof_vel_noise
+        # Use zero-mean reset noise.  The previous [0, scale] sampling biased
+        # every perturbed joint in the positive direction, which is especially
+        # harmful when thickening recovery-reference states for RSI training.
+        self.simulator.dof_pos[env_ids] = (
+            dof_pos
+            + (2.0 * torch.rand_like(dof_pos) - 1.0) * dof_pos_noise
+        )
+        self.simulator.dof_vel[env_ids] = (
+            dof_vel
+            + (2.0 * torch.rand_like(dof_vel) - 1.0) * dof_vel_noise
+        )
 
     _kick_motion_res_counter = -1
     _kick_motion_res_buffer: Optional[Dict[str, torch.Tensor]] = None

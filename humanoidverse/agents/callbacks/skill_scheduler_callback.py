@@ -29,6 +29,7 @@ A, B (default: from scheduler_config.yaml candidates), switch_entry_A,
 enabled.
 """
 
+import copy
 import numpy as np
 import torch
 import yaml
@@ -58,6 +59,11 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         # Benchmark diagnostics.  This is deliberately observational: it does
         # not alter planning or reset behaviour.
         self.injection_history = []
+        self.recovery_fsm = None
+        self._reference_dirty = False
+        self._reset_warmup_pending = False
+        self._recovery_policy = None
+        self._policy_role = None
 
     # ------------------------------------------------------------------
     # Setup
@@ -118,6 +124,21 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         self.scheduler.install_reference_path(initial_path, 0.0)
         self._installed_version = self.scheduler.path_version
         self._initialized = True
+        recovery_cfg = getattr(cfg, "recovery_fsm", {})
+        if recovery_cfg.get("enabled", False):
+            from humanoidverse.deploy.skill_scheduler.recovery_fsm import RecoveryFSM
+            self.recovery_fsm = RecoveryFSM(self, recovery_cfg)
+            self.env.recovery_controller = self.recovery_fsm
+            self._update_recovery_slot_role(initial_path)
+            recovery_checkpoint = recovery_cfg.get("policy_checkpoint", None)
+            if recovery_checkpoint:
+                # Independent weights; the task/Buffer actor remains untouched.
+                model = copy.deepcopy(self.training_loop.alg)
+                checkpoint = torch.load(recovery_checkpoint, map_location=self.device)
+                model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+                model.eval()
+                self._recovery_policy = model.act_inference
+                self.recovery_fsm.record("recovery_policy_loaded", checkpoint=str(recovery_checkpoint))
         logger.info(
             f"SkillScheduler ready: {self.graph.skill_names}, slot={self._slot}, "
             f"A={A:.3f}, switch_entry_A={self.scheduler.switch_entry_A:.3f}, "
@@ -152,6 +173,26 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
     # Reference injection
     # ------------------------------------------------------------------
 
+    def _update_recovery_slot_role(self, path):
+        """Hot-swapped eval entries must not retain their old reward role."""
+        lib = self.env._motion_lib
+        source = next(int(self.graph.skill_ids[n]) for n in path
+                      if int(self.graph.skill_ids[n]) >= 0)
+        is_transition = bool(np.any(self.graph.is_buffer[path]))
+        role = self.graph.skill_roles[source]
+        bucket = ("recovery_transition" if role == "recovery" else "task_transition") \
+            if is_transition else role + "_skill"
+        for indices in lib._role_indices.values():
+            if self._slot in indices:
+                indices.remove(self._slot)
+        lib._role_indices[bucket].append(self._slot)
+        lib._is_transition_entry[self._slot] = is_transition
+        lib._recovery_motion_mask[self._slot] = role == "recovery" and not is_transition
+        self.env.is_cross_skill_env[0] = is_transition
+        for name in ("_task_collision_motion_mask", "_recovery_reward_motion_mask"):
+            if hasattr(self.env, name):
+                delattr(self.env, name)
+
     def _align_to_robot(self, traj, robot_yaw, robot_xy_rel):
         """Rotate the assembled trajectory (graph-normalized: yaw ~ 0, x-y
         centered) into the robot's current heading and shift it so the first
@@ -170,7 +211,9 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             traj["root_rot"] = (delta * rr).as_quat()
 
     def _inject(self, path, robot_yaw=None, robot_xy_rel=None, align=True,
-                note=""):
+                note="", physical_reset_mode="auto"):
+        if physical_reset_mode not in ("auto", "never"):
+            raise ValueError("Invalid physical_reset_mode")
         env = self.env
         lib = env._motion_lib
         # A graph path containing Buffer nodes is a one-shot transition
@@ -192,14 +235,25 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
                          target_heading=None)
         env.curr_motion_ids = lib._curr_motion_ids
         env.curr_motion_keys = lib.curr_motion_keys
+        if self.recovery_fsm is not None:
+            self._update_recovery_slot_role(path)
 
         trigger = str(getattr(self.scheduler, "last_trigger", "?"))
         entry_threshold = self.scheduler.switch_entry_A \
             if trigger == "cmd_change" else self.scheduler.A
-        close_entry = getattr(self.scheduler, "last_best_sim", np.inf) \
-            <= entry_threshold
-        did_reset = not (align and close_entry)
-        if align and close_entry:
+        entry_sim = float(getattr(self.scheduler, "last_best_sim", np.inf))
+        entry_metric = "graph_sim"
+        if trigger == "recovery_entry" and self.recovery_fsm is not None:
+            entry_sim = self.recovery_fsm.selected.distance
+            entry_threshold = self.recovery_fsm.threshold
+            entry_metric = "recovery_nn"
+        close_entry = entry_threshold is None or entry_sim <= entry_threshold
+        preserve_physics = physical_reset_mode == "never" or (align and close_entry)
+        # FSM-enabled reference switches must not hide failures with respawns.
+        if self.recovery_fsm is not None and align:
+            preserve_physics = True
+        did_reset = not preserve_physics
+        if preserve_physics:
             # TRANSITION at its time-aligned source: path[0] is the current
             # reference frame and the live error passed the applicable entry
             # threshold, so DO NOT physically reset -- just restart the
@@ -213,10 +267,11 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             # frame so reference and robot agree (a far entry without reset
             # makes the robot chase a mismatched pose -> instant
             # body_z/motion_far termination, observed in the 3-skill eval).
-            env.reset_envs_idx(torch.tensor([0], device=env.device))
+            self._reset_reference_episode()
             self._reset_detect_cooldown = 5  # ignore the env's follow-up reset
         env._kick_motion_res_counter = -1
         self._just_injected = True
+        self._reference_dirty = True
 
         n_cross = sum(1 for u, v in zip(path[:-1], path[1:])
                       if self.graph.skill_ids[u] != self.graph.skill_ids[v])
@@ -224,20 +279,22 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
             "step": int(env.common_step_counter),
             "command": int(self.scheduler.current_cmd),
             "trigger": str(getattr(self.scheduler, "last_trigger", "?")),
-            "best_sim": float(getattr(self.scheduler, "last_best_sim", np.nan)),
-            "entry_threshold": float(entry_threshold),
+            "best_sim": entry_sim,
+            "entry_metric": entry_metric,
+            "entry_threshold": None if entry_threshold is None else float(entry_threshold),
             "path_nodes": int(len(path)),
             "cross_hops": int(n_cross),
             "buffer_nodes": int(self.graph.is_buffer[path].sum()),
             "aligned": bool(align),
             "physical_reset": bool(did_reset),
+            "reset_committed_before_physics": bool(did_reset),
         })
         logger.info(
             f"Injected path: {len(path)} nodes "
             f"({self.graph.skill_names[self.scheduler.current_cmd]}), "
             f"trigger={getattr(self.scheduler, 'last_trigger', '?')}{note}, "
-            f"best_sim={getattr(self.scheduler, 'last_best_sim', float('nan')):.3f}, "
-            f"entry_threshold={entry_threshold:.3f}, "
+            f"best_sim={entry_sim:.3f}, entry_metric={entry_metric}, "
+            f"entry_threshold={entry_threshold}, "
             f"start=node{path[0]}(skill {self.graph.skill_ids[path[0]]}, "
             f"frame {self.graph.frame_idxs[path[0]]}), "
             f"cross_hops={n_cross}, "
@@ -251,19 +308,175 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         respawn the robot at the skill's initial pose. Used when a transition
         finishes (loop the target skill) and after any natural env reset
         (fall / termination): 'back to the skill start and replay'."""
+        if self.recovery_fsm is not None and self.recovery_fsm.active:
+            from humanoidverse.deploy.skill_scheduler.recovery_fsm import RecoveryState
+            self.recovery_fsm.transition(RecoveryState.HARD_RESET,
+                                         reason="recovery_reference_exhausted")
+            return
         path = self.scheduler.pure_skill_path(skill_id)
         self.scheduler.install_reference_path(path, t)
-        # Respawning at the skill start IS the recovery action (until the
-        # step-4 recovery FSM exists), so clear a latched e-stop.
+        # Legacy playback loops still respawn at the skill start. Active
+        # autonomous recovery is handled above and never counted as a loop.
         self.scheduler.estopped = False
         self._inject(path, align=False, note=", pure_skill")
         self._installed_version = self.scheduler.path_version
+
+    def _reset_reference_episode(self):
+        """Commit a pre-step reset before physics can overwrite its tensors."""
+        env = self.env
+        ids = torch.tensor([0], device=env.device)
+        env.reset_envs_idx(ids)  # Clears the old episode's history and actions.
+        env.simulator.set_actor_root_state_tensor(ids, env.simulator.all_root_states)
+        env.simulator.set_dof_state_tensor(ids, env.simulator.dof_state)
+        env.need_to_refresh_envs[ids] = False
+        if hasattr(env, "action_queue"):
+            env.action_queue[ids] = 0
+        # Gym rigid-body FK tensors remain stale until physics advances.
+        # Use one ordinary, counted zero-action step, as env.reset_all does;
+        # its post-step computes observations/history from the new episode.
+        self._reset_warmup_pending = True
+
+    def _refresh_reference_policy(self, actor_state):
+        if self._reset_warmup_pending:
+            actor_state["actions"] = torch.zeros_like(actor_state["actions"])
+            actor_state["dones"] = torch.zeros_like(self.env.reset_buf, dtype=torch.bool)
+            self._reset_warmup_pending = False
+            self._reference_dirty = False
+            return actor_state
+        if self._reference_dirty:
+            # Live reference switches preserve physical history; only refresh
+            # the target and inference, without appending history twice.
+            self.env._pre_compute_observations_callback()
+            self.env._compute_observations()
+            clip = self.env.config.normalization.clip_observations
+            actor_state["obs"] = {k: torch.clamp(v, -clip, clip)
+                                  for k, v in self.env.obs_buf_dict.items()}
+            actor_state["actions"] = self.training_loop.eval_policy(actor_state["obs"])
+            self._reference_dirty = False
+        return self._apply_recovery_policy(actor_state)
 
     # ------------------------------------------------------------------
     # Per-step hook
     # ------------------------------------------------------------------
 
     def on_pre_eval_env_step(self, actor_state):
+        if not self.enabled:
+            return actor_state
+        if not self._initialized:
+            self._lazy_init()
+        fsm = self.recovery_fsm
+        if fsm is not None:
+            requested_push = bool(getattr(self.env, "requested_fall_push", False))
+            self.env.requested_fall_push = False
+            push_step = int(fsm.config.get("fall_push_step", -1))
+            push_due = push_step >= 0 and self.env.common_step_counter >= push_step \
+                and not getattr(self, "_fall_push_applied", False)
+            if requested_push or push_due:
+                self._fall_push_applied = True
+                if not fsm.active:
+                    velocity = torch.as_tensor(fsm.config.get("fall_push_velocity_xy", [1.5, 0.0]),
+                                               device=self.env.device, dtype=torch.float)
+                    if velocity.shape != (2,) or not bool(torch.isfinite(velocity).all()):
+                        raise ValueError("fall_push_velocity_xy must contain two finite velocities")
+                    self.env.simulator.robot_root_states[0, 7:9] += velocity
+                    # Flush BEFORE physics: a post-step refresh would overwrite
+                    # this velocity before the ordinary reset dispatcher flushes.
+                    self.env.simulator.set_actor_root_state_tensor(
+                        torch.zeros(1, dtype=torch.long, device=self.env.device),
+                        self.env.simulator.all_root_states)
+                    fsm.record("fall_push", delta_velocity_xy=velocity.cpu().tolist(),
+                               physical_reset=False)
+                else:
+                    fsm.record("fall_push_ignored", reason="recovery_active")
+            # Safety monitoring must have priority over pending user commands.
+            # Old scheduler.step() returns early while a command is queued.
+            if not fsm.active and self.scheduler.enable_safety_replan \
+                    and fsm.now >= self.scheduler._grace_until:
+                guidance = self.scheduler.current_guidance()
+                x, _, _ = self._extract_state()
+                if guidance is not None and self.graph.sim_to(x, guidance.node_id) >= self.scheduler.B:
+                    fsm.request_recovery("scheduler_B")
+            requested = bool(getattr(self.env, "requested_recovery", False))
+            self.env.requested_recovery = False
+            test_step = int(fsm.config.get("diagnostic_trigger_step", -1))
+            test_due = test_step >= 0 and self.env.common_step_counter >= test_step \
+                and not getattr(self, "_recovery_test_triggered", False)
+            if requested or test_due:
+                self._recovery_test_triggered = True
+                fsm.request_recovery("manual_test" if requested else "scripted_test")
+            was_active = fsm.active
+            command = getattr(self.env, "requested_skill_id", None)
+            blocked = fsm.before_scheduler(command if was_active else None)
+            if was_active:
+                self.env.requested_skill_id = None
+                # The environment has already performed the one hard reset.
+                if not fsm.active:
+                    actor_state["dones"] = torch.zeros(1, dtype=torch.bool,
+                                                      device=self.env.device)
+            if blocked:
+                return actor_state
+        actor_state = self._scheduler_step(actor_state)
+        if fsm is not None:
+            if self.scheduler.estopped:
+                fsm.request_recovery("scheduler_estop")
+            fsm.after_scheduler()
+        return self._refresh_reference_policy(actor_state)
+
+    def _apply_recovery_policy(self, actor_state):
+        """Recovery actor owns recovery frames; unified actor owns all Buffers."""
+        if self._recovery_policy is None:
+            return actor_state
+        guidance = self.scheduler.current_guidance()
+        skill_id = -1 if guidance is None else int(self.graph.skill_ids[guidance.node_id])
+        use_recovery = (self.recovery_fsm is not None and self.recovery_fsm.active
+                        and not self.recovery_fsm.damping_active and skill_id >= 0
+                        and self.graph.skill_roles[skill_id] == "recovery")
+        role = "recovery" if use_recovery else "task_and_buffer"
+        if role != self._policy_role:
+            self.recovery_fsm.record("policy_switch", policy=role, skill_id=skill_id)
+            self._policy_role = role
+            # Do not execute delayed actions from the other policy.
+            if hasattr(self.env, "action_queue"):
+                self.env.action_queue.zero_()
+        with torch.no_grad():
+            policy = self._recovery_policy if use_recovery else self.training_loop.eval_policy
+            actor_state["actions"] = policy(actor_state["obs"])
+        return actor_state
+
+    def install_recovery_entry(self, entry):
+        _, end = self.graph.skill_range(entry.skill_id)
+        path = list(range(entry.node_id, end))
+        self.scheduler.estopped = False
+        self.scheduler._clear_pending_command()
+        self.scheduler.set_command(entry.skill_id)
+        self.scheduler.last_trigger = "recovery_entry"
+        x, yaw, xy = self._extract_state()
+        self.scheduler.last_best_sim = self.graph.sim_to(x, entry.node_id)
+        self.scheduler.install_reference_path(path, self.env.common_step_counter * self.env.dt)
+        self._inject(path, yaw, xy, physical_reset_mode="never", note=", recovery_entry")
+        self._installed_version = self.scheduler.path_version
+        # No stale delayed task action may be sent at recovery startup.
+        if hasattr(self.env, "action_queue"):
+            self.env.action_queue.zero_()
+
+    def prepare_recovery_hard_reset(self, skill_id):
+        """Only prepare the reference; env's reset dispatcher owns physics."""
+        self.scheduler.estopped = False
+        self.scheduler._clear_pending_command()
+        self.scheduler.set_command(skill_id)
+        path = self.scheduler.pure_skill_path(skill_id)
+        self.scheduler.last_trigger = "recovery_hard_reset"
+        self.scheduler.install_reference_path(path, self.env.common_step_counter * self.env.dt)
+        self._inject(path, align=False, physical_reset_mode="never",
+                     note=", preparing_hard_reset")
+        self._installed_version = self.scheduler.path_version
+
+    def on_post_evaluate_policy(self):
+        if self.recovery_fsm is not None:
+            logger.info("RecoveryFSM summary: {}", self.recovery_fsm.summary())
+            self.env.recovery_controller = None
+
+    def _scheduler_step(self, actor_state):
         if not self.enabled:
             return actor_state
         if not self._initialized:
@@ -277,6 +490,7 @@ class SkillSchedulerEvalCallback(RL_EvalCallback):
         if hasattr(env, "requested_skill_id"):
             env.requested_skill_id = None
         if self._auto_interval > 0 and self._auto_skills \
+                and not (self.recovery_fsm is not None and self.recovery_fsm.active) \
                 and env.common_step_counter > 0 \
                 and env.common_step_counter % self._auto_interval == 0:
             user_cmd = self._auto_skills[self._auto_idx % len(self._auto_skills)]

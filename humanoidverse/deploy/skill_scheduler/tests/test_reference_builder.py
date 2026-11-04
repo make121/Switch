@@ -6,7 +6,9 @@ Run directly:
 """
 
 import sys
+from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -18,6 +20,7 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 
 from SG_build.skill_graph_V2 import (
+    SkillGraphBuilder,
     align_motion_to_pose,
     interpolate_frame,
 )
@@ -32,11 +35,21 @@ PKLS = [
 ]
 
 
+@lru_cache(maxsize=1)
+def generated_graph():
+    """Rebuild the ignored test graph from the two committed example clips."""
+    directory = TemporaryDirectory(prefix="switch_reference_test_")
+    graph, _ = SkillGraphBuilder([str(p) for p in PKLS]).build()
+    graph.save_json(str(Path(directory.name) / "skill_graph.json"))
+    return directory
+
+
 def setup():
     with open(CONFIG) as f:
         cfg = yaml.safe_load(f)
+    graph_path = GRAPH if GRAPH.is_file() else Path(generated_graph().name) / "skill_graph.json"
     graph = SkillGraphData.from_json(
-        str(GRAPH), sigma_q=cfg["sigma_q"], sigma_qdot=cfg["sigma_qdot"],
+        str(graph_path), sigma_q=cfg["sigma_q"], sigma_qdot=cfg["sigma_qdot"],
         sigma_p=cfg["sigma_p"], lambda_sw=5.0,
         w_q=cfg.get("w_q", 1.0), w_qdot=cfg.get("w_qdot", 1.0),
         w_p=cfg.get("w_p", 1.0))
@@ -206,6 +219,18 @@ def test_nn_path_builds_trajectory():
           f"(path {len(path)} nodes, {graph.num_nodes - n0} runtime buffers)")
 
 
+def test_partial_buffer_preserves_original_phase():
+    graph, rb = setup()
+    (src, dst), chain = next(iter(graph.buffer_chains.items()))
+    path = [src] + list(chain) + [dst]
+    whole = rb.build_trajectory(path)
+    for start, end in ((1, 3), (2, len(path)), (len(path)-2, len(path))):
+        partial = rb.build_trajectory(path[start:end])
+        for field in ("dof", "root_trans_offset", "pose_aa", "contact_mask", "kappa"):
+            np.testing.assert_allclose(partial[field], whole[field][start:end], atol=1e-7)
+    print("PASS test_partial_buffer_preserves_original_phase")
+
+
 def main():
     test_original_path()
     test_buffer_chain()
@@ -213,6 +238,7 @@ def main():
     test_contact_mask_present()
     test_xy_continuity_across_skills()
     test_nn_path_builds_trajectory()
+    test_partial_buffer_preserves_original_phase()
     print("\nALL TESTS PASSED")
 
 

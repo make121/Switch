@@ -17,13 +17,21 @@ from humanoidverse.utils.config_utils import *  # noqa: E402, F403
 from loguru import logger
 
 import threading
-from pynput import keyboard
 
 def on_press(key, env):
     try:
         if key.char == 'n':
-            env.request_next_task = True
-            logger.info("Requested next task (will execute at safe point).")
+            if getattr(env, "recovery_controller", None) is not None:
+                logger.info("Recovery FSM owns references; use 7/8/9 for task commands.")
+            else:
+                env.request_next_task = True
+                logger.info("Requested next task (will execute at safe point).")
+        if key.char == 'r':
+            env.requested_recovery = True
+            logger.info("Requested recovery FSM diagnostic trigger (if enabled).")
+        if key.char == 't':
+            env.requested_fall_push = True
+            logger.info("Requested physical fall push (if recovery FSM enabled).")
         # Skill scheduler commands (consumed by SkillSchedulerEvalCallback):
         # 7/8/9/0 -> skill 0/1/2/3
         if key.char in ('7', '8', '9', '0'):
@@ -48,6 +56,7 @@ def on_press(key, env):
         pass
 
 def listen_for_keypress(env):
+    from pynput import keyboard
     with keyboard.Listener(on_press=lambda key: on_press(key, env)) as listener:
         listener.join()
 
@@ -133,6 +142,15 @@ def main(override_config: OmegaConf):
     from humanoidverse.agents.base_algo.base_algo import BaseAlgo  # noqa: E402
     from humanoidverse.utils.helpers import pre_process_config
     import torch
+    # Optional reproducible evaluation. Apply before domain randomization/reset.
+    if config.get("eval_seed", None) is not None:
+        import random
+        import numpy as np
+        eval_seed = int(config.eval_seed)
+        random.seed(eval_seed)
+        np.random.seed(eval_seed)
+        torch.manual_seed(eval_seed)
+        logger.info(f"Evaluation random seed: {eval_seed}")
     from humanoidverse.utils.inference_helpers import export_policy_as_jit, export_policy_as_onnx, export_policy_and_encoder_as_onnx
 
     pre_process_config(config)
@@ -175,7 +193,7 @@ def main(override_config: OmegaConf):
     algo.load(config.checkpoint)
 
     EXPORT_POLICY = False
-    EXPORT_ONNX = True
+    EXPORT_ONNX = config.get("export_onnx", True)
 
     checkpoint_path = str(checkpoint)
 

@@ -60,14 +60,20 @@ class TransitionMetricsEvalCallback(RL_EvalCallback):
             "termination": term_names,
             "is_buffer": bool(getattr(env, "ref_is_buffer", [[False]])[0][0]),
             "kappa": self._scalar(getattr(env, "ref_kappa", None), 0.0),
+            "recovery_state": getattr(getattr(getattr(env, "recovery_controller", None),
+                                                "state", None), "value", None),
         })
         return actor_state
 
     def on_post_evaluate_policy(self):
         scheduler_history = []
+        recovery_events = []
         for callback in self.training_loop.eval_callbacks:
             if hasattr(callback, "injection_history"):
                 scheduler_history = list(callback.injection_history)
+                fsm = getattr(callback, "recovery_fsm", None)
+                if fsm is not None:
+                    recovery_events = list(fsm.events)
                 break
 
         def values(key):
@@ -77,6 +83,10 @@ class TransitionMetricsEvalCallback(RL_EvalCallback):
         body_max = values("body_error_max_m")
         dof_l1 = values("dof_error_l1_rad")
         buffer_rows = [r for r in self.rows if r["is_buffer"]]
+        attempt_results = [
+            event for event in recovery_events
+            if event.get("event") == "attempt_result"
+        ]
         summary = {
             "num_steps": len(self.rows),
             "done_steps": sum(r["done"] for r in self.rows),
@@ -90,6 +100,16 @@ class TransitionMetricsEvalCallback(RL_EvalCallback):
                 [r["body_error_mean_m"] for r in buffer_rows]
             )) if buffer_rows else None,
             "scheduler_injections": scheduler_history,
+            "recovery_events": recovery_events,
+            "recovery_successes": sum(e["event"] == "recovery_success" for e in recovery_events),
+            "recovery_hard_resets": sum(e["event"] == "hard_reset" for e in recovery_events),
+            "recovery_labelled_attempts": len(attempt_results),
+            "recovery_attempt_successes": sum(
+                event.get("result") == "success" for event in attempt_results
+            ),
+            "recovery_attempt_failures": sum(
+                event.get("result") == "failure" for event in attempt_results
+            ),
         }
         output = Path(str(self.config.output_path))
         output.parent.mkdir(parents=True, exist_ok=True)

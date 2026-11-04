@@ -133,7 +133,18 @@ class ReferenceBuilder:
                     and int(g.buffer_dst[path[i]]) == dst:
                 chain.append(path[i])
                 i += 1
-            n_buf = len(chain)
+            # A replanned path may start/end inside an existing Buffer. Keep
+            # each node's original interpolation phase; renormalizing the
+            # remaining slice to 0..1 would change the reference pose.
+            registered = g.buffer_chains.get((src, dst), ())
+            if chain[0] in registered:
+                n_buf = len(registered)
+            else:
+                # NN-created runtime chains are not registered as graph macros.
+                matching = np.flatnonzero(g.is_buffer & (g.buffer_src == src)
+                                         & (g.buffer_dst == dst))
+                matching = [node for node in matching if node not in registered]
+                n_buf = max(int(g.kappas[node]) for node in matching)
             s_skill = int(g.skill_ids[src])
             d_skill = int(g.skill_ids[dst])
             d_frame = int(g.frame_idxs[dst])
@@ -150,7 +161,8 @@ class ReferenceBuilder:
                 self.motions[d_skill], d_frame,
                 source_frame["root_trans_offset"][:2],
                 self._frame_yaw(source_frame))
-            for k in range(1, n_buf + 1):
+            for buffer_node in chain:
+                k = n_buf - int(g.kappas[buffer_node]) + 1
                 frames.append(self._buffer_frame(
                     src, dst, k / (n_buf + 1),
                     src_motion=active_motion, dst_motion=target_motion))

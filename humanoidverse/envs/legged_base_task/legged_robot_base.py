@@ -283,6 +283,10 @@ class LeggedRobotBase(BaseTask):
         else:
             self.actions_after_delay = self.actions.clone()
 
+        recovery = getattr(self, "recovery_controller", None)
+        if recovery is not None and self.is_evaluating:
+            recovery.pre_control_step(self)
+
 
     def _physics_step(self):
         self.render()
@@ -292,6 +296,9 @@ class LeggedRobotBase(BaseTask):
 
     def _apply_force_in_physics_step(self):
         self.torques = self._compute_torques(self.actions_after_delay).view(self.torques.shape)
+        recovery = getattr(self, "recovery_controller", None)
+        if recovery is not None and self.is_evaluating:
+            self.torques = recovery.override_torque(self, self.torques)
         self.simulator.apply_torques_at_dof(self.torques)
 
     def _post_physics_step(self):
@@ -306,6 +313,9 @@ class LeggedRobotBase(BaseTask):
         self._update_tasks_callback()
         # compute observations, rewards, resets, ...
         self._check_termination()
+        recovery = getattr(self, "recovery_controller", None)
+        if recovery is not None and self.is_evaluating:
+            recovery.intercept_terminations(self)
         self._compute_reward()
         # check terminations
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
@@ -488,7 +498,9 @@ class LeggedRobotBase(BaseTask):
         self.time_out_buf |= self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
         
         # self.log_dict["terminate_by_time_out"] = self.time_out_buf.float().mean()
-        self.reset_buf_terminate_by["time_out"] = self.time_out_buf
+        # Motion-tracking subclasses also OR motion_end into time_out_buf.
+        # Keep the actual episode timeout distinct for recovery dispatch.
+        self.reset_buf_terminate_by["time_out"] = self.time_out_buf.clone()
 
     def reset_envs_idx(self, env_ids, target_states=None, target_buf=None):
         """ Reset some environments.

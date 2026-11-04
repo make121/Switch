@@ -235,6 +235,9 @@ class PPO(BaseAlgo):
                 logger.info(f"Optimizer loaded from checkpoint")
                 logger.info(f"Learning rate: {self.learning_rate}")
             self.current_learning_iteration = loaded_dict["iter"]
+            if self.config.get("resume_next_iteration", False):
+                self.current_learning_iteration += 1
+                logger.info(f"Resuming at next iteration {self.current_learning_iteration}")
             return loaded_dict["infos"]
 
     def save(self, path, infos=None):
@@ -294,6 +297,10 @@ class PPO(BaseAlgo):
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             self.ep_infos.clear()
 
+        # A run can stop between periodic saves. Label the final parameters with
+        # the last completed update rather than the previous save's iteration.
+        if num_learning_iterations > 0:
+            self.current_learning_iteration = tot_iter - 1
         self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
 
     def learn_distill(self):
@@ -308,7 +315,8 @@ class PPO(BaseAlgo):
 
         num_learning_iterations = self.num_learning_iterations
 
-        tot_iter = self.current_learning_iteration + num_learning_iterations
+        first_learning_iteration = self.current_learning_iteration
+        tot_iter = first_learning_iteration + num_learning_iterations
 
         for it in range(self.current_learning_iteration, tot_iter):
             self.hist_encoding = True
@@ -331,6 +339,7 @@ class PPO(BaseAlgo):
                 "rewbuffer": self.rewbuffer,
                 "lenbuffer": self.lenbuffer,
                 "num_learning_iterations": num_learning_iterations,
+                "first_learning_iteration": first_learning_iteration,
             }
             self._post_epoch_logging(log_dict)
             if it % self.save_interval == 0:
@@ -338,6 +347,8 @@ class PPO(BaseAlgo):
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             self.ep_infos.clear()
 
+        if num_learning_iterations > 0:
+            self.current_learning_iteration = tot_iter - 1
         self.save(os.path.join(self.log_dir, "model_{}.pt".format(self.current_learning_iteration)))
 
     def _actor_rollout_step(self, obs_dict, policy_state_dict):
@@ -747,7 +758,8 @@ class PPO(BaseAlgo):
             # Calculate mean standard deviation and frames per second (FPS)
             mean_std = self.alg.std.mean()
             fps = int(self.num_steps_per_env * self.env.num_envs / iteration_time)
-            str = f" \033[1m Learning iteration {log_dict['it']}/{self.current_learning_iteration + log_dict['num_learning_iterations']} \033[0m "
+            first_it = log_dict.get("first_learning_iteration", self.current_learning_iteration)
+            str = f" \033[1m Learning iteration {log_dict['it']}/{first_it + log_dict['num_learning_iterations']} \033[0m "
 
             return (
                 f"""{str.center(width, " ")}\n\n"""
@@ -842,6 +854,9 @@ class PPO(BaseAlgo):
             # Calculate ETA and generate total time log
             fps = int(self.num_steps_per_env * self.env.num_envs / iteration_time)
             eta = self.tot_time / (log_dict["it"] + 1) * (log_dict["num_learning_iterations"] - log_dict["it"])
+            if "first_learning_iteration" in log_dict:
+                completed = log_dict["it"] - log_dict["first_learning_iteration"] + 1
+                eta = self.tot_time / completed * max(0, log_dict["num_learning_iterations"] - completed)
 
             self.writer.add_scalar("Perf/total_fps", fps, log_dict["it"])
             self.writer.add_scalar("Perf/collection_time", log_dict["collection_time"], log_dict["it"])
